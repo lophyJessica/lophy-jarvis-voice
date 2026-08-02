@@ -1,0 +1,361 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+
+interface UseVoiceActivityDetectorOptions {
+  enabled?: boolean
+  mockMode?: boolean
+  playbackActive?: boolean
+  silenceThreshold?: number
+  speechStartDelayMs?: number
+  speechEndDelayMs?: number
+  canStartSpeech?: () => boolean
+  onSpeechStart?: () => void
+  onSpeechEnd?: () => void
+  onRecordingChunk?: (blob: Blob) => void
+  onRecordingComplete?: (blob: Blob) => void
+}
+
+const defaultSilenceThreshold = 0.03
+const defaultSpeechStartDelayMs = 300
+const defaultSpeechEndDelayMs = 1_500
+const playbackThresholdMultiplier = 1.35
+
+function stopMediaStream(stream: MediaStream | null) {
+  stream?.getTracks().forEach((track) => track.stop())
+}
+
+export function useVoiceActivityDetector({
+  enabled = true,
+  mockMode = false,
+  playbackActive = false,
+  silenceThreshold = defaultSilenceThreshold,
+  speechStartDelayMs = defaultSpeechStartDelayMs,
+  speechEndDelayMs = defaultSpeechEndDelayMs,
+  canStartSpeech,
+  onSpeechStart,
+  onSpeechEnd,
+  onRecordingChunk,
+  onRecordingComplete,
+}: UseVoiceActivityDetectorOptions = {}) {
+  const [isListening, setIsListening] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [volume, setVolume] = useState(0)
+  const [error, setError] = useState<string | null>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const analyserRef = useRef<AnalyserNode | null>(null)
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const oscillatorRef = useRef<OscillatorNode | null>(null)
+  const oscillatorStartedRef = useRef(false)
+  const animationFrameRef = useRef(0)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const chunksRef = useRef<Blob[]>([])
+  const discardRecordingRef = useRef(false)
+  const isListeningRef = useRef(false)
+  const isStartingRef = useRef(false)
+  const isVoiceActiveRef = useRef(false)
+  const startIdRef = useRef(0)
+  const speechStartedAtRef = useRef<number | null>(null)
+  const silenceStartedAtRef = useRef<number | null>(null)
+  const ignoredUntilRef = useRef(0)
+  const mockVolumeRef = useRef(0)
+  const lastVolumeUpdateRef = useRef(0)
+  const callbacksRef = useRef({ canStartSpeech, onSpeechStart, onSpeechEnd, onRecordingChunk, onRecordingComplete })
+  const settingsRef = useRef({
+    enabled,
+    playbackActive,
+    silenceThreshold,
+    speechStartDelayMs,
+    speechEndDelayMs,
+  })
+
+  useEffect(() => {
+    callbacksRef.current = { canStartSpeech, onSpeechStart, onSpeechEnd, onRecordingChunk, onRecordingComplete }
+  }, [canStartSpeech, onRecordingChunk, onRecordingComplete, onSpeechEnd, onSpeechStart])
+
+  useEffect(() => {
+    settingsRef.current = {
+      enabled,
+      playbackActive,
+      silenceThreshold,
+      speechStartDelayMs,
+      speechEndDelayMs,
+    }
+  }, [enabled, playbackActive, silenceThreshold, speechEndDelayMs, speechStartDelayMs])
+
+  const startRecorder = useCallback(() => {
+    const stream = streamRef.current
+    if (!stream || recorderRef.current?.state === 'recording') return false
+    if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported('audio/webm')) {
+      setError('当前浏览器不支持 audio/webm 录音')
+      return false
+    }
+
+    const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+    chunksRef.current = []
+    discardRecordingRef.current = false
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        chunksRef.current.push(event.data)
+        callbacksRef.current.onRecordingChunk?.(event.data)
+      }
+    }
+    recorder.onerror = () => {
+      chunksRef.current = []
+      recorderRef.current = null
+      isVoiceActiveRef.current = false
+      setIsRecording(false)
+      setError('录音失败，请重试')
+    }
+    recorder.onstop = () => {
+      const shouldDiscard = discardRecordingRef.current
+      const blob = chunksRef.current.length > 0
+        ? new Blob(chunksRef.current, { type: 'audio/webm' })
+        : null
+      chunksRef.current = []
+      recorderRef.current = null
+      discardRecordingRef.current = false
+      setIsRecording(false)
+      if (!shouldDiscard && blob) callbacksRef.current.onRecordingComplete?.(blob)
+    }
+    recorderRef.current = recorder
+    recorder.start(2_000)
+    setIsRecording(true)
+    return true
+  }, [])
+
+  const finishRecording = useCallback(() => {
+    const recorder = recorderRef.current
+    if (!recorder || recorder.state === 'inactive') return false
+    isVoiceActiveRef.current = false
+    speechStartedAtRef.current = null
+    silenceStartedAtRef.current = null
+    callbacksRef.current.onSpeechEnd?.()
+    recorder.stop()
+    return true
+  }, [])
+
+  const beginManualRecording = useCallback(() => {
+    if (!isListeningRef.current || isVoiceActiveRef.current) return false
+    if (!startRecorder()) return false
+    isVoiceActiveRef.current = true
+    callbacksRef.current.onSpeechStart?.()
+    return true
+  }, [startRecorder])
+
+  const suppressFor = useCallback((durationMs: number) => {
+    ignoredUntilRef.current = performance.now() + Math.max(0, durationMs)
+    speechStartedAtRef.current = null
+    silenceStartedAtRef.current = null
+  }, [])
+
+  const setMockVolume = useCallback((nextVolume: number) => {
+    mockVolumeRef.current = Math.max(0, nextVolume)
+    if (oscillatorRef.current && !oscillatorStartedRef.current) {
+      oscillatorRef.current.start()
+      oscillatorStartedRef.current = true
+    }
+    void audioContextRef.current?.resume()
+  }, [])
+
+  const stop = useCallback(() => {
+    startIdRef.current += 1
+    isStartingRef.current = false
+    window.cancelAnimationFrame(animationFrameRef.current)
+    animationFrameRef.current = 0
+    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+      discardRecordingRef.current = true
+      recorderRef.current.stop()
+    }
+    recorderRef.current = null
+    if (oscillatorRef.current && oscillatorStartedRef.current) oscillatorRef.current.stop()
+    oscillatorRef.current?.disconnect()
+    oscillatorRef.current = null
+    oscillatorStartedRef.current = false
+    sourceRef.current?.disconnect()
+    sourceRef.current = null
+    analyserRef.current?.disconnect()
+    analyserRef.current = null
+    stopMediaStream(streamRef.current)
+    streamRef.current = null
+    void audioContextRef.current?.close()
+    audioContextRef.current = null
+    isListeningRef.current = false
+    isVoiceActiveRef.current = false
+    speechStartedAtRef.current = null
+    silenceStartedAtRef.current = null
+    mockVolumeRef.current = 0
+    setVolume(0)
+    setIsRecording(false)
+    setIsListening(false)
+  }, [])
+
+  const start = useCallback(async () => {
+    if (isListeningRef.current || isStartingRef.current) return
+    const AudioContextConstructor = window.AudioContext
+      ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!AudioContextConstructor || typeof MediaRecorder === 'undefined') {
+      throw new Error('当前浏览器不支持实时语音所需的 Web Audio API')
+    }
+    if (!mockMode && !navigator.mediaDevices?.getUserMedia) {
+      throw new Error('当前浏览器不支持麦克风访问')
+    }
+
+    const startId = startIdRef.current + 1
+    startIdRef.current = startId
+    isStartingRef.current = true
+    setError(null)
+    let pendingStream: MediaStream | null = null
+    let pendingAudioContext: AudioContext | null = null
+    let pendingAnalyser: AnalyserNode | null = null
+    let pendingSource: MediaStreamAudioSourceNode | null = null
+    let pendingOscillator: OscillatorNode | null = null
+
+    try {
+      pendingAudioContext = new AudioContextConstructor()
+      if (mockMode) {
+        const destination = pendingAudioContext.createMediaStreamDestination()
+        const gain = pendingAudioContext.createGain()
+        pendingOscillator = pendingAudioContext.createOscillator()
+        pendingOscillator.frequency.value = 440
+        gain.gain.value = 0.08
+        pendingOscillator.connect(gain)
+        gain.connect(destination)
+        pendingStream = destination.stream
+      } else {
+        pendingStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        })
+      }
+      if (startIdRef.current !== startId) {
+        pendingOscillator?.stop()
+        stopMediaStream(pendingStream)
+        void pendingAudioContext.close()
+        return
+      }
+
+      pendingAnalyser = pendingAudioContext.createAnalyser()
+      pendingAnalyser.fftSize = 1024
+      pendingAnalyser.smoothingTimeConstant = 0.62
+      pendingSource = pendingAudioContext.createMediaStreamSource(pendingStream)
+      pendingSource.connect(pendingAnalyser)
+      if (!mockMode) await pendingAudioContext.resume()
+
+      if (startIdRef.current !== startId) {
+        pendingOscillator?.stop()
+        pendingSource.disconnect()
+        pendingAnalyser.disconnect()
+        stopMediaStream(pendingStream)
+        void pendingAudioContext.close()
+        return
+      }
+    } catch (startError) {
+      pendingOscillator?.stop()
+      pendingSource?.disconnect()
+      pendingAnalyser?.disconnect()
+      stopMediaStream(pendingStream)
+      void pendingAudioContext?.close()
+      throw startError
+    } finally {
+      if (startIdRef.current === startId) isStartingRef.current = false
+    }
+
+    const stream = pendingStream
+    const audioContext = pendingAudioContext
+    const analyser = pendingAnalyser
+    const source = pendingSource
+    if (!stream || !audioContext || !analyser || !source) return
+
+    streamRef.current = stream
+    audioContextRef.current = audioContext
+    analyserRef.current = analyser
+    sourceRef.current = source
+    oscillatorRef.current = pendingOscillator
+    oscillatorStartedRef.current = false
+    isListeningRef.current = true
+    setIsListening(true)
+
+    const samples = new Uint8Array(analyser.fftSize)
+    const readVolume = () => {
+      if (mockMode) return mockVolumeRef.current
+      analyser.getByteTimeDomainData(samples)
+      let sumSquares = 0
+      for (let index = 0; index < samples.length; index += 1) {
+        const centered = (samples[index] - 128) / 128
+        sumSquares += centered * centered
+      }
+      return Math.sqrt(sumSquares / samples.length)
+    }
+
+    const tick = () => {
+      const now = performance.now()
+      const nextVolume = readVolume()
+      if (now - lastVolumeUpdateRef.current >= 80) {
+        lastVolumeUpdateRef.current = now
+        setVolume(nextVolume)
+      }
+
+      const settings = settingsRef.current
+      if (!settings.enabled || now < ignoredUntilRef.current) {
+        speechStartedAtRef.current = null
+        silenceStartedAtRef.current = null
+        animationFrameRef.current = window.requestAnimationFrame(tick)
+        return
+      }
+
+      const effectiveThreshold = settings.silenceThreshold
+        * (settings.playbackActive ? playbackThresholdMultiplier : 1)
+      const hasVoice = nextVolume >= effectiveThreshold
+
+      if (hasVoice) {
+        silenceStartedAtRef.current = null
+        if (!isVoiceActiveRef.current) {
+          speechStartedAtRef.current ??= now
+          if (now - speechStartedAtRef.current >= settings.speechStartDelayMs) {
+            if (callbacksRef.current.canStartSpeech?.() === false) {
+              speechStartedAtRef.current = now
+            } else if (startRecorder()) {
+              isVoiceActiveRef.current = true
+              speechStartedAtRef.current = null
+              callbacksRef.current.onSpeechStart?.()
+            }
+          }
+        }
+      } else {
+        speechStartedAtRef.current = null
+        if (isVoiceActiveRef.current) {
+          silenceStartedAtRef.current ??= now
+          if (now - silenceStartedAtRef.current >= settings.speechEndDelayMs) finishRecording()
+        }
+      }
+
+      animationFrameRef.current = window.requestAnimationFrame(tick)
+    }
+
+    animationFrameRef.current = window.requestAnimationFrame(tick)
+  }, [finishRecording, mockMode, startRecorder])
+
+  useEffect(() => stop, [stop])
+
+  const isSupported = typeof window !== 'undefined'
+    && typeof MediaRecorder !== 'undefined'
+    && Boolean(window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)
+    && (mockMode || Boolean(navigator.mediaDevices?.getUserMedia))
+
+  return {
+    beginManualRecording,
+    error,
+    finishRecording,
+    isListening,
+    isRecording,
+    isSupported,
+    setMockVolume,
+    start,
+    stop,
+    suppressFor,
+    volume,
+  }
+}

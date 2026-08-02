@@ -1,0 +1,16 @@
+QA_NET GET /pcm-capture-worklet.js 200
+QA_NET POST /p/jarvis/asr-stream/start 200 session=qa-session-2
+QA_NET POST /p/jarvis/asr-stream/chunk 200 session=qa-session-2 chunk=1 interval_ms=0 type=audio/pcm bytes=10240
+QA_NET POST /p/jarvis/asr-stream/chunk 200 session=qa-session-2 chunk=2 interval_ms=319 type=audio/pcm bytes=10240
+QA_NET POST /p/jarvis/asr-stream/chunk 200 session=qa-session-2 chunk=3 interval_ms=321 type=audio/pcm bytes=10240
+QA_NET POST /p/jarvis/asr-stream/chunk 200 session=qa-session-2 chunk=4 interval_ms=317 type=audio/pcm bytes=10240
+QA_NET POST /p/jarvis/asr-stream/chunk 200 session=qa-session-2 chunk=5 interval_ms=321 type=audio/pcm bytes=10240
+QA_NET POST /p/jarvis/asr-stream/chunk 200 session=qa-session-2 chunk=6 interval_ms=317 type=audio/pcm bytes=10240
+QA_NET POST /p/jarvis/asr-stream/chunk 200 session=qa-session-2 chunk=7 interval_ms=325 type=audio/pcm bytes=10240
+QA_NET POST /p/jarvis/asr-stream/chunk 200 session=qa-session-2 chunk=8 interval_ms=319 type=audio/pcm bytes=10240
+QA_NET POST /p/jarvis/asr-stream/chunk 200 session=qa-session-2 chunk=9 interval_ms=320 type=audio/pcm bytes=10240
+QA_NET POST /p/jarvis/asr-stream/chunk 200 session=qa-session-2 chunk=10 interval_ms=319 type=audio/pcm bytes=10240
+QA_NET POST /p/jarvis/asr-stream/end 200 session=qa-session-2 chunks=38
+QA_NET POST /p/jarvis/v1/chat/completions 200 sse=true
+QA_NET POST /p/jarvis/history 200
+QA_NET POST /tts 200 bytes=14444
