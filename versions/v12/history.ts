@@ -1,15 +1,21 @@
 import { buildJarvisAuthHeaders, handleJarvisAuthResponse } from '../auth'
-import { normalizeStoredRecord, type SyncMessage } from '../db'
 import { createTimedRequest } from './request'
 
 const historyUrl = '/p/jarvis/history'
 
-function readMessages(payload: unknown): unknown[] {
-  if (Array.isArray(payload)) return payload
+export interface CloudHistoryMessage {
+  id?: string
+  role: 'user' | 'assistant'
+  content: string
+  time?: string
+}
+
+function readMessages(payload: unknown): CloudHistoryMessage[] {
+  if (Array.isArray(payload)) return payload as CloudHistoryMessage[]
   if (!payload || typeof payload !== 'object') return []
   const record = payload as { messages?: unknown; data?: { messages?: unknown } }
   const messages = record.messages ?? record.data?.messages
-  return Array.isArray(messages) ? messages : []
+  return Array.isArray(messages) ? messages as CloudHistoryMessage[] : []
 }
 
 async function historyFetch(input: string, init?: RequestInit) {
@@ -29,24 +35,16 @@ async function historyFetch(input: string, init?: RequestInit) {
   }
 }
 
-export async function loadCloudHistory(limit = 200): Promise<SyncMessage[]> {
+export async function loadCloudHistory(limit = 200) {
   const response = await historyFetch(`${historyUrl}?limit=${limit}`)
-  const raw = readMessages(await response.json())
-  const total = raw.length
-  const normalized: SyncMessage[] = []
-  raw.forEach((item, index) => {
-    if (!item || typeof item !== 'object') return
-    const message = normalizeStoredRecord(item as Record<string, unknown>, index, total)
-    if (message) normalized.push(message)
-  })
-  return normalized.slice(-limit)
+  return readMessages(await response.json())
 }
 
-export async function saveCloudHistory(messages: SyncMessage[]) {
+export async function saveCloudHistory(messages: CloudHistoryMessage[]) {
   await historyFetch(historyUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages: messages.slice(-200) }),
+    body: JSON.stringify({ messages }),
   })
 }
 

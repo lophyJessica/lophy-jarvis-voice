@@ -1,16 +1,14 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type UIEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type UIEvent } from 'react'
 import {
   AudioOutlined,
   CheckCircleOutlined,
   CheckOutlined,
   CloseCircleOutlined,
-  CloseOutlined,
   CloudSyncOutlined,
   CopyOutlined,
   DeleteOutlined,
   LoadingOutlined,
   LogoutOutlined,
-  PictureOutlined,
   SendOutlined,
   SoundOutlined,
   StopOutlined,
@@ -23,59 +21,70 @@ import {
   JARVIS_USERNAME_KEY,
   setUnauthorizedHandler,
 } from './auth'
-import {
-  checkHermesConnection,
-  defaultSystemPrompt,
-  HermesError,
-  streamChatCompletion,
-  type ChatMessage,
-} from './api/hermes'
-import { clearCloudHistory, loadCloudHistory, saveCloudHistory } from './api/history'
-import {
-  clearLocalMessages,
-  createStoredMessage,
-  getLocalMessages,
-  mergeMessages,
-  replaceLocalMessages,
-  toChatHistory,
-  type StoredMessage,
-} from './db'
+import { checkHermesConnection, HermesError, streamChatCompletion, type ChatMessage } from './api/hermes'
+import { clearCloudHistory, loadCloudHistory, saveCloudHistory, type CloudHistoryMessage } from './api/history'
 import JarvisCore, { type JarvisStatus } from './components/JarvisCore'
 import LoginPage from './components/LoginPage'
-import ChatMessageRow from './components/ChatMessageRow'
 import { useSpeechSynthesis } from './hooks/useSpeechSynthesis'
 import { useStreamingAsr } from './hooks/useStreamingAsr'
 import { useVoiceActivityDetector } from './hooks/useVoiceActivityDetector'
 import { copyTextToClipboard } from './utils/clipboard'
-import { readImageFiles } from './utils/images'
 import { renderMarkdown } from './utils/markdown'
-import { buildMessageContent, getMessageText } from './types/messages'
 import './App.css'
+
+interface DisplayMessage extends Omit<ChatMessage, 'role'> {
+  id: string
+  role: 'user' | 'assistant'
+  time: string
+}
 
 type ConnectionState = 'checking' | 'online' | 'offline'
 type HistorySyncState = 'syncing' | 'synced' | 'fallback'
-type InputMode = 'text' | 'voice'
 
-const systemPrompt = defaultSystemPrompt
-const assistantName = '罗宾'
-const modeStorageKey = 'robin-mode'
+const systemPrompt = '你是贾维斯，用户的个人 AI 助手。用户叫刘龙飞，也称路飞。'
+const storageKey = 'jarvis-voice-messages'
 const maxSavedMessages = 200
 
 const timeFormatter = new Intl.DateTimeFormat('zh-CN', {
   hour: '2-digit',
   minute: '2-digit',
-  second: '2-digit',
   hour12: false,
 })
 
-function formatMessageDisplayTime(createdAt: string) {
-  const parsed = Date.parse(createdAt)
-  if (Number.isNaN(parsed)) return '--:--'
-  return timeFormatter.format(new Date(parsed))
+function createMessage(role: 'user' | 'assistant', content: string): DisplayMessage {
+  return {
+    id: crypto.randomUUID(),
+    role,
+    content,
+    time: timeFormatter.format(new Date()),
+  }
 }
 
-function readStoredMode(): InputMode {
-  return localStorage.getItem(modeStorageKey) === 'voice' ? 'voice' : 'text'
+function readSavedMessages(): DisplayMessage[] {
+  const saved = localStorage.getItem(storageKey)
+  if (!saved) return []
+  try {
+    const messages = JSON.parse(saved) as DisplayMessage[]
+    return Array.isArray(messages) ? messages.slice(-maxSavedMessages) : []
+  } catch {
+    return []
+  }
+}
+
+function toHistory(messages: DisplayMessage[]): ChatMessage[] {
+  return messages.map(({ role, content }) => ({ role, content }))
+}
+
+function normalizeCloudMessages(messages: CloudHistoryMessage[]): DisplayMessage[] {
+  return messages.flatMap((message) => {
+    if ((message.role !== 'user' && message.role !== 'assistant') || typeof message.content !== 'string') return []
+    return [{
+      id: typeof message.id === 'string' && message.id ? message.id : crypto.randomUUID(),
+      role: message.role,
+      content: message.content,
+      time: typeof message.time === 'string' && message.time ? message.time : timeFormatter.format(new Date()),
+    }]
+  }).slice(-maxSavedMessages)
 }
 
 function statusLabel(status: JarvisStatus) {
@@ -94,10 +103,10 @@ function cleanSpeechText(text: string) {
 
 function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogout: () => void; isDev: boolean }) {
   const { message: messageApi } = AntApp.useApp()
-  const [messages, setMessages] = useState<StoredMessage[]>([])
-  const [history, setHistory] = useState<ChatMessage[]>([])
+  const savedMessages = useMemo(() => readSavedMessages(), [])
+  const [messages, setMessages] = useState<DisplayMessage[]>(savedMessages)
+  const [history, setHistory] = useState<ChatMessage[]>(() => toHistory(savedMessages))
   const [input, setInput] = useState('')
-  const [pendingImages, setPendingImages] = useState<string[]>([])
   const [transcript, setTranscript] = useState('')
   const [streamingTranscript, setStreamingTranscript] = useState('')
   const [streamingText, setStreamingText] = useState('')
@@ -107,8 +116,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   const [copiedKey, setCopiedKey] = useState('')
   const [autoMode, setAutoMode] = useState(true)
   const [vadThreshold, setVadThreshold] = useState(0.03)
-  const [mode, setMode] = useState<InputMode>(() => readStoredMode())
-  const [expandedMessageIds, setExpandedMessageIds] = useState<Set<string>>(() => new Set())
   const qaMode = useMemo(() => {
     const hostname = window.location.hostname
     return (hostname === 'localhost' || hostname === '127.0.0.1')
@@ -122,11 +129,9 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   const historyInitializedRef = useRef(false)
   const statusRef = useRef<JarvisStatus>('idle')
   const autoModeRef = useRef(autoMode)
-  const modeRef = useRef(mode)
   const suppressVadRef = useRef<(durationMs: number) => void>(() => undefined)
   const copyResetTimerRef = useRef(0)
   const inputTextAreaRef = useRef<TextAreaRef>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
   const {
     speak,
     cancel: cancelSpeech,
@@ -166,15 +171,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     copyResetTimerRef.current = window.setTimeout(() => setCopiedKey(''), 2_000)
   }, [writeClipboard])
 
-  const toggleMessageExpanded = useCallback((id: string) => {
-    setExpandedMessageIds((current) => {
-      const next = new Set(current)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }, [])
-
   const stopSpeaking = useCallback(() => {
     cancelSpeech()
     if (statusRef.current === 'speaking') transitionTo('idle')
@@ -188,22 +184,9 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     transitionTo('idle')
   }, [cancelSpeech, transitionTo])
 
-  // Cloud sync only. Local Dexie cache is written by the messages-change effect
-  // so that every rendered message (in exact order) survives a refresh.
-  const persistTurn = useCallback(async (nextMessages: StoredMessage[]) => {
-    try {
-      await saveCloudHistory(nextMessages)
-      setHistorySyncState('synced')
-    } catch (historyError) {
-      console.error('Robin history upload failed', historyError)
-      setHistorySyncState('fallback')
-    }
-  }, [])
-
-  const sendMessage = useCallback(async (overrideText?: string, overrideImages?: string[]) => {
-    const text = (overrideText ?? input).trim()
-    const images = overrideImages ?? pendingImages
-    if (!text && images.length === 0) {
+  const sendMessage = useCallback(async (overrideContent?: string) => {
+    const content = (overrideContent ?? input).trim()
+    if (!content) {
       transitionTo('idle')
       return
     }
@@ -215,11 +198,8 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
 
     cancelSpeech()
     setInput('')
-    setPendingImages([])
     setStreamingText('')
-
-    const content = buildMessageContent(text, images)
-    const userMessage = createStoredMessage('user', content)
+    const userMessage = createMessage('user', content)
     const messagesBeforeTurn = messagesRef.current
     const pendingMessages = [...messagesBeforeTurn, userMessage].slice(-maxSavedMessages)
     messagesRef.current = pendingMessages
@@ -241,19 +221,25 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
         systemPrompt,
         historyRef.current,
       )
-      if (!responseText.trim()) throw new HermesError('罗宾返回了空回复', 'network')
+      if (!responseText.trim()) throw new HermesError('Hermes 返回了空回复', 'network')
 
-      const assistantMessage = createStoredMessage('assistant', responseText)
-      const nextMessages = [...pendingMessages, assistantMessage].slice(-maxSavedMessages)
+      const assistantMessage = createMessage('assistant', responseText)
+      const nextMessages = [...messagesBeforeTurn, userMessage, assistantMessage].slice(-maxSavedMessages)
       messagesRef.current = nextMessages
       setMessages(nextMessages)
-      setHistory(toChatHistory(nextMessages))
+      setHistory(toHistory(nextMessages))
       setStreamingText('')
       setConnectionState('online')
-      await persistTurn(nextMessages)
+      try {
+        await saveCloudHistory(nextMessages)
+        setHistorySyncState('synced')
+      } catch (historyError) {
+        console.error('Jarvis history upload failed', historyError)
+        setHistorySyncState('fallback')
+      }
 
       const speechText = cleanSpeechText(responseText)
-      if (speechText && synthesisSupported && modeRef.current === 'voice') {
+      if (speechText && synthesisSupported) {
         transitionTo('speaking')
         await speak(speechText, () => suppressVadRef.current(200))
       }
@@ -266,18 +252,16 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
         transitionTo('idle')
         return
       }
-      const fallback = error instanceof HermesError ? error.message : '罗宾暂时不可用，请稍后再试'
+      const fallback = error instanceof HermesError ? error.message : '贾维斯暂时不可用，请稍后再试'
       setStreamingText('')
       if (error instanceof HermesError) setConnectionState('offline')
-      const errorMessages = [...messagesRef.current, createStoredMessage('assistant', fallback)].slice(-maxSavedMessages)
-      messagesRef.current = errorMessages
-      setMessages(errorMessages)
+      setMessages((current) => [...current, createMessage('assistant', fallback)])
       transitionTo('idle')
       void messageApi.error(fallback)
     } finally {
       if (activeRequestRef.current === requestController) activeRequestRef.current = null
     }
-  }, [cancelSpeech, input, messageApi, pendingImages, persistTurn, speak, synthesisSupported, transitionTo])
+  }, [cancelSpeech, input, messageApi, speak, synthesisSupported, transitionTo])
 
   const handleVadSpeechStart = useCallback(() => {
     if (statusRef.current === 'speaking') cancelSpeech()
@@ -312,7 +296,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
         return
       }
       try {
-        await sendMessage(text, [])
+        await sendMessage(text)
       } finally {
         setTranscript('')
       }
@@ -324,8 +308,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   }, [finishStreamingAsr, messageApi, sendMessage, transitionTo])
 
   const canVadStartSpeech = useCallback(() => (
-    modeRef.current === 'voice'
-      && autoModeRef.current
+    autoModeRef.current
       && (statusRef.current === 'idle' || statusRef.current === 'speaking')
   ), [])
 
@@ -341,7 +324,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     suppressFor,
     volume: vadVolume,
   } = useVoiceActivityDetector({
-    enabled: mode === 'voice' && autoMode,
+    enabled: autoMode,
     mockMode: qaMode,
     playbackActive: isSpeaking,
     silenceThreshold: vadThreshold,
@@ -366,86 +349,23 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     }
   }, [beginManualRecording, finishRecording, messageApi, stopSpeaking])
 
-  const enterVoiceMode = useCallback(() => {
-    if (!vadSupported) {
-      void messageApi.warning('当前浏览器不支持麦克风录音')
-      return
-    }
-    modeRef.current = 'voice'
-    setMode('voice')
-    localStorage.setItem(modeStorageKey, 'voice')
-    transitionTo('idle')
-    startVad().catch((error: unknown) => {
-      const fallback = error instanceof Error ? error.message : '麦克风监听启动失败'
-      void messageApi.warning(fallback)
-    })
-  }, [messageApi, startVad, transitionTo, vadSupported])
-
-  const exitVoiceMode = useCallback(() => {
-    modeRef.current = 'text'
-    setMode('text')
-    localStorage.setItem(modeStorageKey, 'text')
-    activeRequestRef.current?.abort()
-    activeRequestRef.current = null
-    cancelSpeech()
-    stopVad()
-    setTranscript('')
-    setStreamingTranscript('')
-    if (statusRef.current !== 'thinking') transitionTo('idle')
-  }, [cancelSpeech, stopVad, transitionTo])
-
-  const appendImages = useCallback(async (files: FileList | File[]) => {
-    try {
-      const dataUrls = await readImageFiles(files)
-      if (dataUrls.length > 0) setPendingImages((current) => [...current, ...dataUrls])
-    } catch {
-      void messageApi.error('图片处理失败，请重试')
-    }
-  }, [messageApi])
-
-  const handleComposerPaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = event.clipboardData?.items
-    if (!items) return
-    const imageFiles = Array.from(items)
-      .filter((item) => item.type.startsWith('image/'))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => file !== null)
-    if (imageFiles.length === 0) return
-    event.preventDefault()
-    void appendImages(imageFiles)
-  }, [appendImages])
-
-  // Mount: hydrate history from cloud, fall back to Dexie local cache on failure.
   useEffect(() => {
     let active = true
     setHistorySyncState('syncing')
-    ;(async () => {
-      try {
-        const [server, local] = await Promise.all([loadCloudHistory(maxSavedMessages), getLocalMessages()])
-        if (!active) return
-        const merged = mergeMessages(local, server).slice(-maxSavedMessages)
-        messagesRef.current = merged
-        setMessages(merged)
-        setHistory(toChatHistory(merged))
-        historyInitializedRef.current = true
-        setHistorySyncState('synced')
-        try {
-          await replaceLocalMessages(merged)
-        } catch (dbError) {
-          console.error('Robin local cache sync failed', dbError)
-        }
-      } catch (historyError) {
-        if (!active) return
-        console.warn('Robin cloud history unavailable; restoring from Dexie', historyError)
-        const local = await getLocalMessages().catch(() => [])
-        if (!active) return
-        messagesRef.current = local
-        setMessages(local)
-        setHistory(toChatHistory(local))
-        historyInitializedRef.current = true
-        setHistorySyncState('fallback')
-      }
-    })()
+    loadCloudHistory(maxSavedMessages).then((cloudMessages) => {
+      if (!active) return
+      const normalizedMessages = normalizeCloudMessages(cloudMessages)
+      messagesRef.current = normalizedMessages
+      setMessages(normalizedMessages)
+      setHistory(toHistory(normalizedMessages))
+      historyInitializedRef.current = true
+      setHistorySyncState('synced')
+    }).catch((historyError) => {
+      if (!active) return
+      historyInitializedRef.current = true
+      setHistorySyncState('fallback')
+      console.warn('Jarvis history download failed; using local cache', historyError)
+    })
     return () => {
       active = false
     }
@@ -466,16 +386,10 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   }, [autoMode])
 
   useEffect(() => {
-    modeRef.current = mode
-  }, [mode])
-
-  useEffect(() => {
     suppressVadRef.current = suppressFor
   }, [suppressFor])
 
-  // Voice capture only runs in voice mode; text mode keeps the mic released.
   useEffect(() => {
-    if (mode !== 'voice') return
     let active = true
     startVad().catch((error: unknown) => {
       if (!active) return
@@ -486,7 +400,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
       active = false
       stopVad()
     }
-  }, [messageApi, mode, startVad, stopVad])
+  }, [messageApi, startVad, stopVad])
 
   useEffect(() => {
     if (vadError) void messageApi.warning(vadError)
@@ -496,15 +410,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     messagesRef.current = messages
   }, [messages])
 
-  // Persist every rendered message to Dexie (id/role/content/createdAt, original order)
-  // once history has hydrated, so an offline refresh restores the exact list & timestamps.
-  useEffect(() => {
-    if (!historyInitializedRef.current) return
-    void replaceLocalMessages(messages).catch((dbError) => {
-      console.error('Robin local cache write failed', dbError)
-    })
-  }, [messages])
-
   useEffect(() => {
     historyRef.current = history
   }, [history])
@@ -512,6 +417,16 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   useEffect(() => {
     statusRef.current = status
   }, [status])
+
+  useEffect(() => {
+    const saved = messages.slice(-maxSavedMessages)
+    if (saved.length !== messages.length) {
+      setMessages(saved)
+      return
+    }
+    if (saved.length === 0) localStorage.removeItem(storageKey)
+    else localStorage.setItem(storageKey, JSON.stringify(saved))
+  }, [messages])
 
   useLayoutEffect(() => {
     const messageList = messageListRef.current
@@ -540,18 +455,13 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     setTranscript('')
     setStreamingTranscript('')
     setStreamingText('')
-    setExpandedMessageIds(new Set())
-    try {
-      await clearLocalMessages()
-    } catch (dbError) {
-      console.error('Robin local cache clear failed', dbError)
-    }
+    localStorage.removeItem(storageKey)
     if (!historyInitializedRef.current) return
     try {
       await clearCloudHistory()
       setHistorySyncState('synced')
     } catch (historyError) {
-      console.error('Robin history clear failed', historyError)
+      console.error('Jarvis history clear failed', historyError)
       setHistorySyncState('fallback')
     }
   }, [cancelSpeech, transitionTo])
@@ -562,7 +472,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     shouldAutoScrollRef.current = distanceFromBottom <= 72
   }, [])
 
-  const handleMessageListClick = useCallback((event: React.MouseEvent<HTMLElement>) => {
+  const handleMessageListClick = useCallback((event: ReactMouseEvent<HTMLElement>) => {
     const target = event.target as HTMLElement
     const copyButton = target.closest<HTMLButtonElement>('[data-code-copy="true"]')
     if (!copyButton) return
@@ -571,29 +481,25 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     void writeClipboard(content).then((copied) => {
       if (!copied) return
       copyButton.classList.add('copied')
-      window.setTimeout(() => copyButton.classList.remove('copied'), 2_000)
+      copyButton.setAttribute('aria-label', '已复制')
+      copyButton.title = '已复制'
+      window.setTimeout(() => {
+        copyButton.classList.remove('copied')
+        const originalLabel = copyButton.closest('.rendered-textarea') ? '复制文本内容' : '复制代码'
+        copyButton.setAttribute('aria-label', originalLabel)
+        copyButton.title = originalLabel
+      }, 2_000)
     })
   }, [writeClipboard])
 
-  const lastAssistantText = useMemo(() => {
-    const last = [...messages].reverse().find((message) => message.role === 'assistant')
-    return last ? getMessageText(last.content) : ''
-  }, [messages])
-
-  const isVoiceMode = mode === 'voice'
-  const isThinking = status === 'thinking'
-  const canStopCurrentTurn = status === 'thinking' || status === 'speaking'
-  const hasInputText = input.trim().length > 0
-  const primaryAction: 'send' | 'voice' | 'close' = hasInputText ? 'send' : isVoiceMode ? 'close' : 'voice'
-  const primaryDisabled = primaryAction === 'send'
-    && (historySyncState === 'syncing' || isThinking || status === 'transcribing')
-
+  const lastAssistantText = [...messages].reverse().find((message) => message.role === 'assistant')?.content ?? ''
   const visibleStatusText = status === 'idle'
     ? vadListening
       ? autoMode ? '监听中' : '手动待机'
-      : isVoiceMode ? '等待麦克风' : '待命中'
+      : '等待麦克风'
     : statusLabel(status)
   const normalizedVolume = Math.min(1, vadVolume / Math.max(vadThreshold * 2, 0.001))
+  const canStopCurrentTurn = status === 'thinking' || status === 'speaking'
   const connectionTag = {
     checking: { color: 'processing', icon: <LoadingOutlined />, text: 'Hermes 检测中' },
     online: { color: 'success', icon: <CheckCircleOutlined />, text: 'Hermes 在线' },
@@ -602,49 +508,8 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   const historySyncTag = {
     syncing: { color: 'processing', text: '同步中…' },
     synced: { color: 'success', text: '云端已同步' },
-    fallback: { color: 'warning', text: '本地兜底' },
+    fallback: { color: 'warning', text: '本地记录' },
   }[historySyncState]
-
-  const primaryButton = (() => {
-    if (primaryAction === 'send') {
-      return (
-        <Button
-          type="primary"
-          shape="circle"
-          data-testid="composer-primary-button"
-          data-state="send"
-          icon={<SendOutlined />}
-          onClick={() => void sendMessage()}
-          loading={isThinking}
-          disabled={primaryDisabled}
-          aria-label="发送消息"
-        />
-      )
-    }
-    if (primaryAction === 'close') {
-      return (
-        <Button
-          shape="circle"
-          data-testid="composer-primary-button"
-          data-state="close"
-          icon={<CloseOutlined />}
-          onClick={exitVoiceMode}
-          aria-label="退出语音模式"
-        />
-      )
-    }
-    return (
-      <Button
-        type="primary"
-        shape="circle"
-        data-testid="composer-primary-button"
-        data-state="voice"
-        icon={<AudioOutlined />}
-        onClick={enterVoiceMode}
-        aria-label="切换语音模式"
-      />
-    )
-  })()
 
   return (
     <main className="jarvis-shell">
@@ -652,8 +517,8 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
         <div className="brand-lockup">
           <span className="brand-mark" />
           <div>
-            <Typography.Title level={4}>ROBIN</Typography.Title>
-            <Typography.Text>个人 AI 助手 · 语音 / 文字</Typography.Text>
+            <Typography.Title level={4}>JARVIS</Typography.Title>
+            <Typography.Text>实时语音 AI 控制台</Typography.Text>
           </div>
         </div>
         <div className={`status-readout status-${status}`}>
@@ -662,30 +527,28 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
           {(status === 'thinking' || status === 'transcribing') && <span className="thinking-dots"><i /><i /><i /></span>}
         </div>
         <JarvisCore status={status} />
-        {isVoiceMode && (
-          <div className="voice-control">
-            <button
-              type="button"
-              data-testid="voice-control-button"
-              className={`voice-button voice-button-${status} ${status === 'idle' && vadListening && autoMode ? 'voice-button-listening' : ''}`}
-              onClick={handleVoiceButton}
-              disabled={status === 'transcribing' || status === 'thinking' || (status === 'idle' && autoMode)}
-              aria-label={status === 'recording' ? '停止录音' : status === 'speaking' ? '停止播报' : autoMode ? '自动监听中' : '开始录音'}
-            >
-              {status === 'recording' ? <StopOutlined /> : status === 'speaking' ? <SoundOutlined /> : status === 'idle' ? <AudioOutlined /> : <LoadingOutlined />}
-            </button>
-            <span className="voice-hint">
-              {status === 'idle'
-                ? autoMode ? '直接说话即可' : '点击开始录音'
-                : status === 'recording' ? '说完后自动识别' : statusLabel(status)}
-            </span>
-          </div>
-        )}
+        <div className="voice-control">
+          <button
+            type="button"
+            data-testid="voice-control-button"
+            className={`voice-button voice-button-${status} ${status === 'idle' && vadListening && autoMode ? 'voice-button-listening' : ''}`}
+            onClick={handleVoiceButton}
+            disabled={status === 'transcribing' || status === 'thinking' || (status === 'idle' && autoMode)}
+            aria-label={status === 'recording' ? '停止录音' : status === 'speaking' ? '停止播报' : autoMode ? '自动监听中' : '开始录音'}
+          >
+            {status === 'recording' ? <StopOutlined /> : status === 'speaking' ? <SoundOutlined /> : status === 'idle' ? <AudioOutlined /> : <LoadingOutlined />}
+          </button>
+          <span className="voice-hint">
+            {status === 'idle'
+              ? autoMode ? '直接说话即可' : '点击开始录音'
+              : status === 'recording' ? '说完后自动识别' : statusLabel(status)}
+          </span>
+        </div>
         <div className="core-footer">
           <div className="core-tags">
             <Tag icon={connectionTag.icon} color={connectionTag.color}>{connectionTag.text}</Tag>
-            <Tag icon={<AudioOutlined />} color={isVoiceMode ? (vadListening ? 'processing' : 'default') : 'default'}>
-              {isVoiceMode ? (vadListening ? (autoMode ? 'VAD 监听中' : '手动模式') : vadSupported ? '等待麦克风' : '麦克风不可用') : '文字模式'}
+            <Tag icon={<AudioOutlined />} color={vadListening ? 'processing' : 'default'}>
+              {vadListening ? autoMode ? 'VAD 监听中' : '手动模式' : vadSupported ? '等待麦克风' : '麦克风不可用'}
             </Tag>
           </div>
           <span>CORE / {status.toUpperCase()}</span>
@@ -695,8 +558,8 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
       <Card className="conversation-panel" variant="borderless">
         <header className="conversation-header">
           <div>
-            <Typography.Title level={4}>与罗宾对话</Typography.Title>
-            <Typography.Text type="secondary">{username || 'Robin'} · {isVoiceMode ? '语音实时 · 百度 ASR / Edge TTS' : '文字思考 · 支持图片'}</Typography.Text>
+            <Typography.Title level={4}>语音对话</Typography.Title>
+            <Typography.Text type="secondary">{username || 'Jarvis'} · 百度 ASR / Edge TTS</Typography.Text>
           </div>
           <div className="conversation-actions">
             <Tag data-testid="history-sync-status" icon={<CloudSyncOutlined />} color={historySyncTag.color}>
@@ -732,77 +595,73 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
           </div>
         </header>
 
-        {isVoiceMode && (
-          <section className="voice-settings" aria-label="语音检测设置">
-            <div className="mode-setting">
-              <div>
-                <span className="setting-title">对话模式</span>
-                <span className="setting-description">{autoMode ? '说话即回复，可随时打断' : '点击中央按钮录音'}</span>
-              </div>
-              <Switch
-                checked={autoMode}
-                onChange={(checked) => {
-                  autoModeRef.current = checked
-                  setAutoMode(checked)
-                }}
-                checkedChildren="自动"
-                unCheckedChildren="手动"
-                aria-label="自动语音模式"
-              />
+        <section className="voice-settings" aria-label="语音检测设置">
+          <div className="mode-setting">
+            <div>
+              <span className="setting-title">对话模式</span>
+              <span className="setting-description">{autoMode ? '说话即回复，可随时打断' : '点击中央按钮录音'}</span>
             </div>
-            <div className="threshold-setting">
-              <div className="threshold-heading">
-                <span className="setting-title">VAD 灵敏度</span>
-                <code>{vadThreshold.toFixed(3)}</code>
-              </div>
-              <Slider
-                min={0.015}
-                max={0.08}
-                step={0.005}
-                value={vadThreshold}
-                onChange={setVadThreshold}
-                tooltip={{ formatter: (value) => value?.toFixed(3) }}
-                aria-label="VAD 音量阈值"
-              />
+            <Switch
+              checked={autoMode}
+              onChange={(checked) => {
+                autoModeRef.current = checked
+                setAutoMode(checked)
+              }}
+              checkedChildren="自动"
+              unCheckedChildren="手动"
+              aria-label="自动语音模式"
+            />
+          </div>
+          <div className="threshold-setting">
+            <div className="threshold-heading">
+              <span className="setting-title">VAD 灵敏度</span>
+              <code>{vadThreshold.toFixed(3)}</code>
             </div>
-            {qaMode && (
-              <div className="qa-controls" aria-label="VAD 测试控制">
-                <Tag color="magenta">MOCK VAD</Tag>
-                <Button size="small" data-testid="mock-speech" onClick={() => setMockVolume(vadThreshold * 2.5)}>模拟说话</Button>
-                <Button size="small" data-testid="mock-silence" onClick={() => setMockVolume(0)}>模拟静音</Button>
-              </div>
-            )}
-          </section>
-        )}
+            <Slider
+              min={0.015}
+              max={0.08}
+              step={0.005}
+              value={vadThreshold}
+              onChange={setVadThreshold}
+              tooltip={{ formatter: (value) => value?.toFixed(3) }}
+              aria-label="VAD 音量阈值"
+            />
+          </div>
+          {qaMode && (
+            <div className="qa-controls" aria-label="VAD 测试控制">
+              <Tag color="magenta">MOCK VAD</Tag>
+              <Button size="small" data-testid="mock-speech" onClick={() => setMockVolume(vadThreshold * 2.5)}>模拟说话</Button>
+              <Button size="small" data-testid="mock-silence" onClick={() => setMockVolume(0)}>模拟静音</Button>
+            </div>
+          )}
+        </section>
 
-        {isVoiceMode && (
-          <section className="voice-live-panel" aria-live="polite">
-            <div className="live-block">
-              <span className="live-label">识别文本</span>
-              {status === 'recording' ? (
-                <div className={`streaming-asr-panel ${streamingTranscript ? 'has-text' : ''}`} data-testid="streaming-asr-text">
-                  <span className="streaming-asr-status"><i />识别中</span>
-                  <p>{streamingTranscript || '正在等待实时识别结果…'}</p>
-                </div>
-              ) : (
-                <p>{transcript || (vadListening ? '正在监听你的声音…' : '等待麦克风…')}</p>
-              )}
-              <div className="volume-waveform" data-testid="volume-waveform" aria-label={`当前音量 ${vadVolume.toFixed(3)}`}>
-                {Array.from({ length: 12 }, (_, index) => (
-                  <i
-                    key={index}
-                    style={{ transform: `scaleY(${Math.max(0.12, normalizedVolume * (0.55 + ((index * 7) % 6) / 10))})` }}
-                  />
-                ))}
+        <section className="voice-live-panel" aria-live="polite">
+          <div className="live-block">
+            <span className="live-label">识别文本</span>
+            {status === 'recording' ? (
+              <div className={`streaming-asr-panel ${streamingTranscript ? 'has-text' : ''}`} data-testid="streaming-asr-text">
+                <span className="streaming-asr-status"><i />识别中</span>
+                <p>{streamingTranscript || '正在等待实时识别结果…'}</p>
               </div>
+            ) : (
+              <p>{transcript || (vadListening ? '正在监听你的声音…' : '等待麦克风…')}</p>
+            )}
+            <div className="volume-waveform" data-testid="volume-waveform" aria-label={`当前音量 ${vadVolume.toFixed(3)}`}>
+              {Array.from({ length: 12 }, (_, index) => (
+                <i
+                  key={index}
+                  style={{ transform: `scaleY(${Math.max(0.12, normalizedVolume * (0.55 + ((index * 7) % 6) / 10))})` }}
+                />
+              ))}
             </div>
-            <div className="live-divider" />
-            <div className="live-block">
-              <span className="live-label">回复文本</span>
-              <p>{streamingText || lastAssistantText || '等待罗宾回复…'}</p>
-            </div>
-          </section>
-        )}
+          </div>
+          <div className="live-divider" />
+          <div className="live-block">
+            <span className="live-label">回复文本</span>
+            <p>{streamingText || lastAssistantText || '等待贾维斯回复…'}</p>
+          </div>
+        </section>
 
         <section
           ref={messageListRef}
@@ -815,25 +674,33 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
           onClick={handleMessageListClick}
         >
           {messages.length === 0 && !streamingText ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={isVoiceMode ? '直接对罗宾说话即可开始' : '输入文字或粘贴图片，开始与罗宾对话'} />
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={autoMode ? '直接对贾维斯说话即可开始' : '点击中央按钮开始语音对话'} />
           ) : (
             messages.map((chatMessage) => (
-              <ChatMessageRow
-                key={chatMessage.id}
-                chatMessage={chatMessage}
-                assistantLabel={assistantName}
-                displayTime={formatMessageDisplayTime(chatMessage.createdAt)}
-                expanded={expandedMessageIds.has(chatMessage.id)}
-                copied={copiedKey === chatMessage.id}
-                onToggleExpand={toggleMessageExpanded}
-                onCopy={(text, key) => void copyText(text, key)}
-              />
+              <article key={chatMessage.id} className={`message-row ${chatMessage.role}`}>
+                <div className="message-meta">
+                  <span>{chatMessage.role === 'user' ? '你' : 'JARVIS'}</span>
+                  <time>{chatMessage.time}</time>
+                  <Button
+                    className="message-copy-button"
+                    data-testid={`copy-message-${chatMessage.id}`}
+                    type="text"
+                    size="small"
+                    icon={copiedKey === chatMessage.id ? <CheckOutlined /> : <CopyOutlined />}
+                    onClick={() => void copyText(chatMessage.content, chatMessage.id)}
+                    aria-label={`复制${chatMessage.role === 'user' ? '用户' : '贾维斯'}消息`}
+                  >
+                    {copiedKey === chatMessage.id ? '已复制' : '复制'}
+                  </Button>
+                </div>
+                <div className="message-bubble" dangerouslySetInnerHTML={{ __html: renderMarkdown(chatMessage.content) }} />
+              </article>
             ))
           )}
           {streamingText && (
             <article className="message-row assistant streaming">
               <div className="message-meta">
-                <span>{assistantName}</span>
+                <span>JARVIS</span>
                 <time>实时回复</time>
                 <Button
                   className="message-copy-button"
@@ -846,8 +713,8 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
                   {copiedKey === 'streaming' ? '已复制' : '复制'}
                 </Button>
               </div>
-              <div className="message-bubble message-content streaming-bubble">
-                <div className="message-markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(streamingText) }} />
+              <div className="message-bubble streaming-bubble">
+                <div dangerouslySetInnerHTML={{ __html: renderMarkdown(streamingText) }} />
                 <span className="stream-caret" />
               </div>
             </article>
@@ -855,74 +722,61 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
         </section>
 
         <footer className="composer">
-          {isVoiceMode && (streamingTranscript || (status === 'recording')) && (
-            <div className="live-transcript"><span />{streamingTranscript || '正在聆听…'}</div>
-          )}
-          {pendingImages.length > 0 && (
-            <div className="composer-image-preview">
-              {pendingImages.map((src, index) => (
-                <div key={`${src.slice(0, 32)}-${index}`} className="composer-image-chip">
-                  <img src={src} alt={`待发送图片 ${index + 1}`} />
-                  <Button
-                    type="text"
-                    size="small"
-                    shape="circle"
-                    icon={<CloseCircleOutlined />}
-                    onClick={() => setPendingImages((current) => current.filter((_, itemIndex) => itemIndex !== index))}
-                    aria-label="移除图片"
-                  />
-                </div>
-              ))}
-            </div>
-          )}
-          <input
-            ref={fileInputRef}
-            className="composer-file-input"
-            type="file"
-            accept="image/*"
-            multiple
-            onChange={(event) => {
-              if (event.target.files) void appendImages(event.target.files)
-              event.target.value = ''
-            }}
-          />
           <Input.TextArea
             ref={inputTextAreaRef}
-            className="composer-input"
             value={input}
             onChange={(event) => setInput(event.target.value)}
-            onPaste={handleComposerPaste}
             onPressEnter={(event) => {
               if (!event.shiftKey) {
                 event.preventDefault()
                 void sendMessage()
               }
             }}
-            autoSize={{ minRows: 1, maxRows: 5 }}
-            placeholder={isVoiceMode ? '语音模式 · 也可输入文字，Enter 发送' : '输入指令，Shift + Enter 换行，可粘贴图片'}
-            disabled={historySyncState === 'syncing' || status === 'transcribing'}
+            autoSize={{ minRows: 1, maxRows: 4 }}
+            placeholder="也可以输入文字，Enter 发送"
+            disabled={historySyncState === 'syncing' || status === 'thinking' || status === 'transcribing'}
             aria-label="文字消息"
           />
           <div className="composer-actions">
-            <Tooltip title="上传图片">
+            <Tooltip title={input.trim() ? '复制输入内容' : '无可复制内容'}>
               <Button
-                shape="circle"
-                icon={<PictureOutlined />}
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isThinking}
-                aria-label="上传图片"
-              />
+                data-testid="copy-input-button"
+                className="composer-copy-button"
+                type="text"
+                icon={copiedKey === 'composer' ? <CheckOutlined /> : <CopyOutlined />}
+                onClick={() => {
+                  const nativeElement = inputTextAreaRef.current?.nativeElement
+                  const textArea = nativeElement instanceof HTMLTextAreaElement
+                    ? nativeElement
+                    : nativeElement?.querySelector('textarea')
+                  void copyText(input, 'composer', textArea)
+                }}
+                disabled={!input.trim()}
+                aria-label={copiedKey === 'composer' ? '已复制' : '复制输入内容'}
+              >
+                {copiedKey === 'composer' ? '已复制' : '复制'}
+              </Button>
             </Tooltip>
             {canStopCurrentTurn ? (
               <Button
                 data-testid="stop-current-turn-button"
                 danger
-                shape="circle"
                 icon={<StopOutlined />}
                 onClick={stopCurrentTurn}
                 aria-label="停止当前回合"
+              >
+                停止
+              </Button>
+            ) : (
+              <Button
+                type="primary"
+                shape="circle"
+                icon={<SendOutlined />}
+                onClick={() => void sendMessage()}
+                disabled={historySyncState === 'syncing' || !input.trim() || status === 'transcribing'}
+                aria-label="发送消息"
               />
-            ) : primaryButton}
+            )}
           </div>
         </footer>
       </Card>

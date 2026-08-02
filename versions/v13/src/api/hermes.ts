@@ -7,9 +7,6 @@ export type ChatRole = 'user' | 'assistant' | 'system'
 export interface ChatMessage {
   role: ChatRole
   content: MessageContent
-  // Optional app metadata carried alongside history; stripped before the model request.
-  id?: string
-  createdAt?: string
 }
 
 const cw = '/p/jarvis'
@@ -95,12 +92,10 @@ export async function streamChatCompletion(
   resetTimeout()
 
   try {
-    // Only role/content go to the model; drop any app metadata (id/createdAt).
-    const toWire = ({ role, content }: ChatMessage): ChatMessage => ({ role, content })
     const requestMessages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
-      ...history.map(toWire),
-      ...messages.map(toWire),
+      ...history,
+      ...messages,
     ]
     const response = handleJarvisAuthResponse(await fetch(`${cw}/v1/chat/completions`, {
       method: 'POST',

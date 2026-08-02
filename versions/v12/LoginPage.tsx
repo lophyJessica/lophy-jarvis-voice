@@ -75,12 +75,12 @@ export default function LoginPage({ onSuccess }: LoginPageProps) {
         <div className="login-brand">
           <span className="brand-mark" />
           <div>
-            <Typography.Title level={2}>ROBIN</Typography.Title>
-            <Typography.Text>个人 AI 助手 · 语音 / 文字</Typography.Text>
+            <Typography.Title level={2}>JARVIS</Typography.Title>
+            <Typography.Text>实时语音 AI 控制台</Typography.Text>
           </div>
         </div>
         <Typography.Paragraph type="secondary" className="login-hint">
-          登录后开启语音实时对话、文字思考与跨设备记忆
+          登录后开启录音、百度 ASR、对话与 Edge TTS 全链路
         </Typography.Paragraph>
         <form
           className="login-form"

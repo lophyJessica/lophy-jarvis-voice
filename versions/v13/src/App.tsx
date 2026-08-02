@@ -64,7 +64,6 @@ const maxSavedMessages = 200
 const timeFormatter = new Intl.DateTimeFormat('zh-CN', {
   hour: '2-digit',
   minute: '2-digit',
-  second: '2-digit',
   hour12: false,
 })
 
@@ -188,9 +187,12 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     transitionTo('idle')
   }, [cancelSpeech, transitionTo])
 
-  // Cloud sync only. Local Dexie cache is written by the messages-change effect
-  // so that every rendered message (in exact order) survives a refresh.
   const persistTurn = useCallback(async (nextMessages: StoredMessage[]) => {
+    try {
+      await replaceLocalMessages(nextMessages)
+    } catch (dbError) {
+      console.error('Robin local cache write failed', dbError)
+    }
     try {
       await saveCloudHistory(nextMessages)
       setHistorySyncState('synced')
@@ -494,15 +496,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
 
   useEffect(() => {
     messagesRef.current = messages
-  }, [messages])
-
-  // Persist every rendered message to Dexie (id/role/content/createdAt, original order)
-  // once history has hydrated, so an offline refresh restores the exact list & timestamps.
-  useEffect(() => {
-    if (!historyInitializedRef.current) return
-    void replaceLocalMessages(messages).catch((dbError) => {
-      console.error('Robin local cache write failed', dbError)
-    })
   }, [messages])
 
   useEffect(() => {

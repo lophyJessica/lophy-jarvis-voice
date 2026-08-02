@@ -1,20 +1,15 @@
 import { buildJarvisAuthHeaders, handleJarvisAuthResponse } from '../auth'
-import type { MessageContent } from '../types/messages'
 import { createTimedRequest, REQUEST_TIMEOUT_MS } from './request'
 
 export type ChatRole = 'user' | 'assistant' | 'system'
 
 export interface ChatMessage {
   role: ChatRole
-  content: MessageContent
-  // Optional app metadata carried alongside history; stripped before the model request.
-  id?: string
-  createdAt?: string
+  content: string
 }
 
 const cw = '/p/jarvis'
-export const defaultSystemPrompt =
-  '你是罗宾（Robin），刘龙飞（路飞）的个人 AI 助手。用中文自然、简洁、可靠地回答，需要时可读取图片内容。'
+const defaultSystemPrompt = '你是贾维斯，用户的个人 AI 助手。用户叫刘龙飞，也称路飞。'
 
 export const isHermesConfigured = Boolean(cw)
 
@@ -95,12 +90,10 @@ export async function streamChatCompletion(
   resetTimeout()
 
   try {
-    // Only role/content go to the model; drop any app metadata (id/createdAt).
-    const toWire = ({ role, content }: ChatMessage): ChatMessage => ({ role, content })
     const requestMessages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
-      ...history.map(toWire),
-      ...messages.map(toWire),
+      ...history,
+      ...messages,
     ]
     const response = handleJarvisAuthResponse(await fetch(`${cw}/v1/chat/completions`, {
       method: 'POST',
@@ -111,7 +104,7 @@ export async function streamChatCompletion(
 
     if (!response.ok) {
       if (response.status === 401) throw new HermesError('登录已过期，请重新登录', 'unauthorized')
-      if (response.status >= 500) throw new HermesError('罗宾暂时不可用，请稍后再试', 'unavailable')
+      if (response.status >= 500) throw new HermesError('贾维斯暂时不可用，请稍后再试', 'unavailable')
       throw new HermesError(`Hermes 请求失败（${response.status}）`, 'network')
     }
 
@@ -166,7 +159,7 @@ export async function streamChatCompletion(
     if (error instanceof HermesError) throw error
     if (timedOut) throw new HermesError('请求超时，请重试', 'timeout')
     if (externalSignal?.aborted) throw error
-    throw new HermesError('网络连接失败，请检查罗宾服务配置', 'network')
+    throw new HermesError('网络连接失败，请检查 Jarvis 服务配置', 'network')
   } finally {
     window.clearTimeout(timeoutId)
     externalSignal?.removeEventListener('abort', abortFromExternal)
