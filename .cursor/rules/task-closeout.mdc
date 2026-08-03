@@ -1,0 +1,14 @@
+---
+description: 每轮任务结束必须汇报版本号、文件清单与 zip 状态（语音版仓库）
+alwaysApply: true
+---
+
+# 任务收尾清单（项目内）
+
+与 `version-sync.mdc` 配套。每轮改完**同一对话内**收尾：
+
+1. `versions/v{n}/` + `README.md`
+2. 更新 `AGENTS.md` → `## 当前状态`
+3. 回复用户时必须出现：**v{n}**、**改动文件**、**build**、**jarvis-voice.zip**（含 **mtime**，与 build 同轮更新，见 `AGENTS.md` §2.1）
+
+默认：每轮对外汇报前同轮执行 `npm run build` 并更新 `jarvis-voice.zip`，不得沿用旧 zip 时间戳。

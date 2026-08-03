@@ -1,0 +1,686 @@
+import { useCallback, useEffect, useRef } from 'react'
+import { endAsrStream, startAsrStream, uploadAsrStreamChunk } from '../api/asrStream'
+import { transcribeAudio } from '../api/hermes'
+import { correctAsrText } from '../utils/asrCorrect'
+
+interface UseStreamingAsrOptions {
+  onInterimText: (text: string) => void
+  /** 本地调试：跟嘴指标（?vad-qa=1 时展示） */
+  onDebugStats?: (stats: StreamingAsrDebugStats) => void
+}
+
+export interface StreamingAsrDebugStats {
+  firstInterimMs: number
+  webmPreviewCount: number
+  streamChunkCount: number
+  streamTextHits: number
+  liveSource: 'stream' | 'webm' | ''
+  /** 会话内最长 MID 字数（调试） */
+  liveCharCount: number
+}
+
+export interface StreamingAsrResult {
+  text: string
+  usedFallback: boolean
+  /** 最终文本主要来源 */
+  finalSource: 'baidu-end' | 'baidu-stream' | 'fallback-asr' | 'webm-preview' | ''
+}
+
+const sessionIdleTimeoutMs = 30_000
+/** PCM 上传：首包零延迟，后续短合并（v53） */
+const pcmUploadBufferMs = 50
+const pcmFirstUploadDelayMs = 0
+/** webm /asr：chunk 无 MID 时的跟嘴兜底 */
+const webmPreviewIntervalMs = 480
+const webmPreviewIntervalWithInterimMs = 1_200
+const webmPreviewMinBytes = 900
+const webmPreviewFirstMinBytes = 400
+const webmPreviewFirstLaunchBytes = 2_000
+const maxChunkUploadFailures = 3
+const finalAsrMinBytes = 3_000
+/** 长句朗读：累积 webm 定时整段识别补全（百度 chunk MID 常只跟第一句） */
+const longReadWebmIntervalMs = 3_500
+const longReadWebmFirstDelayMs = 2_000
+
+async function retryOnce<T>(request: () => Promise<T>) {
+  try {
+    return await request()
+  } catch {
+    return request()
+  }
+}
+
+function collapseRepeatedPhrases(text: string): string {
+  let result = text
+  for (let guard = 0; guard < 12; guard += 1) {
+    const next = result
+      .replace(/(.{4,80}?)\1+/g, '$1')
+      .replace(/(.{10,120}?)(\1){1,}/g, '$1')
+    if (next === result) break
+    result = next
+  }
+  return result
+}
+
+function mergeBaiduLiveMid(current: string, incoming: string): string {
+  const inc = incoming.trim()
+  if (!inc) return current
+  const cur = current.trim()
+  if (!cur) return inc
+  if (inc === cur) return cur
+  if (inc.startsWith(cur)) return inc
+  if (cur.startsWith(inc)) return cur
+  if (cur.includes(inc) && inc.length <= cur.length) return cur
+  if (inc.includes(cur)) return inc
+  const sep = /[，。！？、；：,\.!?;:\s]$/.test(cur) ? '' : '，'
+  return `${cur}${sep}${inc}`
+}
+
+function mergeInterimText(current: string, incoming: string): string {
+  return mergeBaiduLiveMid(current, incoming)
+}
+
+function chooseFinalText(
+  finalText: string,
+  interimText: string,
+  bestInterimText = '',
+): { text: string; usedFallback: boolean } {
+  const clean = (value: string) => correctAsrText(collapseRepeatedPhrases(value.trim()))
+  const candidates = [finalText, interimText, bestInterimText].map(clean).filter(Boolean)
+  if (candidates.length === 0) return { text: '', usedFallback: true }
+  let merged = candidates[0] ?? ''
+  for (let index = 1; index < candidates.length; index += 1) {
+    merged = clean(mergeInterimText(merged, candidates[index] ?? ''))
+  }
+  const longest = candidates.reduce((a, b) => (a.length >= b.length ? a : b))
+  const best = merged.length >= longest.length ? merged : longest
+  const usedFallback = !finalText || clean(finalText) !== best
+  return { text: best, usedFallback }
+}
+
+function pickLongestMerged(...texts: string[]): string {
+  const parts = texts
+    .map((value) => correctAsrText(collapseRepeatedPhrases(value.trim())))
+    .filter(Boolean)
+  if (parts.length === 0) return ''
+  return parts.reduce((best, part) => {
+    const merged = mergeBaiduLiveMid(best, part)
+    return merged.length >= best.length ? merged : best
+  }, '')
+}
+
+function waitWithTimeout(promise: Promise<unknown>, timeoutMs: number) {
+  return new Promise<void>((resolve) => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+    window.setTimeout(finish, timeoutMs)
+    void promise.then(finish, finish)
+  })
+}
+
+function waitForPreviewIdle(inFlight: () => boolean, timeoutMs: number) {
+  return new Promise<void>((resolve) => {
+    if (!inFlight()) {
+      resolve()
+      return
+    }
+    const startedAt = performance.now()
+    const tick = () => {
+      if (!inFlight() || performance.now() - startedAt >= timeoutMs) {
+        resolve()
+        return
+      }
+      window.setTimeout(tick, 40)
+    }
+    tick()
+  })
+}
+
+export function useStreamingAsr({ onInterimText, onDebugStats }: UseStreamingAsrOptions) {
+  const onInterimTextRef = useRef(onInterimText)
+  const onDebugStatsRef = useRef(onDebugStats)
+  const sessionIdRef = useRef<string | null>(null)
+  const startPromiseRef = useRef<Promise<string | null> | null>(null)
+  const uploadQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const streamFailedRef = useRef(false)
+  const streamLiveActiveRef = useRef(false)
+  const committedTextRef = useRef('')
+  const hypothesisTextRef = useRef('')
+  const interimTextRef = useRef('')
+  const bestInterimRef = useRef('')
+  const liveAccumRef = useRef('')
+  const peakRawMidRef = useRef('')
+  const pendingChunksRef = useRef<Blob[]>([])
+  const chunkTimerRef = useRef(0)
+  const uploadInFlightRef = useRef(false)
+  const pcmSentCountRef = useRef(0)
+  const generationRef = useRef(0)
+  const lastWebmPreviewAtRef = useRef(0)
+  const webmPreviewInFlightRef = useRef(false)
+  const latestWebmRef = useRef<Blob | null>(null)
+  const webmPreviewControllerRef = useRef<AbortController | null>(null)
+  const livePreviewTimerRef = useRef(0)
+  const livePreviewGenerationRef = useRef(0)
+  const chunkUploadFailuresRef = useRef(0)
+  const stagnantStreamHitsRef = useRef(0)
+  const speechStartedAtRef = useRef(0)
+  const debugStatsRef = useRef<StreamingAsrDebugStats>({
+    firstInterimMs: 0,
+    webmPreviewCount: 0,
+    streamChunkCount: 0,
+    streamTextHits: 0,
+    liveSource: '',
+    liveCharCount: 0,
+  })
+  const sessionControllerRef = useRef<AbortController | null>(null)
+  const idleTimerRef = useRef(0)
+
+  useEffect(() => {
+    onInterimTextRef.current = onInterimText
+  }, [onInterimText])
+
+  useEffect(() => {
+    onDebugStatsRef.current = onDebugStats
+  }, [onDebugStats])
+
+  const emitDebugStats = useCallback(() => {
+    onDebugStatsRef.current?.({ ...debugStatsRef.current })
+  }, [])
+
+  useEffect(() => {
+    if (onDebugStatsRef.current) emitDebugStats()
+  }, [emitDebugStats, onDebugStats])
+
+  const resetDebugStats = useCallback(() => {
+    debugStatsRef.current = {
+      firstInterimMs: 0,
+      webmPreviewCount: 0,
+      streamChunkCount: 0,
+      streamTextHits: 0,
+      liveSource: '',
+      liveCharCount: 0,
+    }
+    emitDebugStats()
+  }, [emitDebugStats])
+
+  const clearIdleTimer = useCallback(() => {
+    window.clearTimeout(idleTimerRef.current)
+    idleTimerRef.current = 0
+  }, [])
+
+  const clearChunkTimer = useCallback(() => {
+    window.clearTimeout(chunkTimerRef.current)
+    chunkTimerRef.current = 0
+  }, [])
+
+  const resetSessionState = useCallback((clearDisplay = false) => {
+    clearIdleTimer()
+    clearChunkTimer()
+    window.clearTimeout(livePreviewTimerRef.current)
+    livePreviewTimerRef.current = 0
+    webmPreviewControllerRef.current?.abort()
+    webmPreviewControllerRef.current = null
+    sessionControllerRef.current?.abort()
+    sessionControllerRef.current = null
+    sessionIdRef.current = null
+    startPromiseRef.current = null
+    uploadQueueRef.current = Promise.resolve()
+    streamFailedRef.current = false
+    streamLiveActiveRef.current = false
+    committedTextRef.current = ''
+    hypothesisTextRef.current = ''
+    interimTextRef.current = ''
+    bestInterimRef.current = ''
+    liveAccumRef.current = ''
+    peakRawMidRef.current = ''
+    pendingChunksRef.current = []
+    uploadInFlightRef.current = false
+    pcmSentCountRef.current = 0
+    lastWebmPreviewAtRef.current = 0
+    latestWebmRef.current = null
+    webmPreviewInFlightRef.current = false
+    chunkUploadFailuresRef.current = 0
+    stagnantStreamHitsRef.current = 0
+    speechStartedAtRef.current = 0
+    if (clearDisplay) onInterimTextRef.current('')
+  }, [clearChunkTimer, clearIdleTimer])
+
+  const armIdleCleanup = useCallback((sessionId: string, generation: number) => {
+    clearIdleTimer()
+    idleTimerRef.current = window.setTimeout(() => {
+      if (generationRef.current !== generation || sessionIdRef.current !== sessionId) return
+      streamFailedRef.current = true
+      sessionControllerRef.current?.abort()
+      sessionControllerRef.current = null
+      sessionIdRef.current = null
+      void endAsrStream(sessionId).catch(() => undefined)
+    }, sessionIdleTimeoutMs)
+  }, [clearIdleTimer])
+
+  const startSession = useCallback(() => {
+    const generation = generationRef.current + 1
+    generationRef.current = generation
+    resetSessionState(false)
+    const controller = new AbortController()
+    sessionControllerRef.current = controller
+    const startPromise = retryOnce(() => startAsrStream(controller.signal)).then((sessionId) => {
+      if (generationRef.current !== generation) {
+        void endAsrStream(sessionId).catch(() => undefined)
+        return null
+      }
+      sessionIdRef.current = sessionId
+      armIdleCleanup(sessionId, generation)
+      return sessionId
+    }).catch(() => {
+      if (generationRef.current === generation) streamFailedRef.current = true
+      return null
+    })
+    startPromiseRef.current = startPromise
+  }, [armIdleCleanup, resetSessionState])
+
+  const prepareSession = useCallback(() => {
+    if (sessionIdRef.current && !streamFailedRef.current) {
+      armIdleCleanup(sessionIdRef.current, generationRef.current)
+    }
+  }, [armIdleCleanup])
+
+  const primeSession = useCallback(() => {
+    startSession()
+  }, [startSession])
+
+  const stopLivePreviewLoop = useCallback(() => {
+    window.clearTimeout(livePreviewTimerRef.current)
+    livePreviewTimerRef.current = 0
+    livePreviewGenerationRef.current += 1
+    webmPreviewControllerRef.current?.abort()
+    webmPreviewControllerRef.current = null
+    webmPreviewInFlightRef.current = false
+  }, [])
+
+  const applyStreamPieces = useCallback((pieces: string[]) => {
+    for (const piece of pieces) {
+      const trimmed = piece.trim()
+      if (!trimmed) continue
+      const rawClean = correctAsrText(trimmed)
+      if (rawClean.length > peakRawMidRef.current.length) {
+        peakRawMidRef.current = rawClean
+      }
+      liveAccumRef.current = mergeBaiduLiveMid(liveAccumRef.current, rawClean)
+      bestInterimRef.current = mergeBaiduLiveMid(bestInterimRef.current, rawClean)
+    }
+    const nextText = correctAsrText(pickLongestMerged(
+      liveAccumRef.current,
+      bestInterimRef.current,
+      peakRawMidRef.current,
+    ))
+    if (!nextText) return false
+    committedTextRef.current = ''
+    hypothesisTextRef.current = nextText
+    if (nextText === interimTextRef.current) {
+      debugStatsRef.current.liveCharCount = Math.max(
+        debugStatsRef.current.liveCharCount,
+        nextText.length,
+        peakRawMidRef.current.length,
+      )
+      emitDebugStats()
+      return false
+    }
+    streamLiveActiveRef.current = true
+    stopLivePreviewLoop()
+    debugStatsRef.current.liveSource = 'stream'
+    if (speechStartedAtRef.current === 0) {
+      speechStartedAtRef.current = performance.now()
+    }
+    if (debugStatsRef.current.firstInterimMs === 0 && speechStartedAtRef.current > 0) {
+      debugStatsRef.current.firstInterimMs = Math.round(performance.now() - speechStartedAtRef.current)
+      emitDebugStats()
+    }
+    interimTextRef.current = nextText
+    debugStatsRef.current.liveCharCount = Math.max(
+      nextText.length,
+      peakRawMidRef.current.length,
+      bestInterimRef.current.length,
+    )
+    onInterimTextRef.current(nextText)
+    emitDebugStats()
+    return true
+  }, [emitDebugStats, stopLivePreviewLoop])
+
+  const requestWebmPreview = useCallback((blob: Blob, urgent = false, longReadBoost = false) => {
+    if (streamLiveActiveRef.current && !streamFailedRef.current && !longReadBoost) return
+    const awaitingFirst = lastWebmPreviewAtRef.current === 0
+    const minBytes = awaitingFirst
+      ? (urgent ? webmPreviewFirstMinBytes : webmPreviewFirstLaunchBytes)
+      : webmPreviewMinBytes
+    if (!blob.size || blob.size < minBytes) return
+    const now = performance.now()
+    const minInterval = longReadBoost ? longReadWebmIntervalMs : (
+      interimTextRef.current.length > 0
+        ? webmPreviewIntervalWithInterimMs
+        : webmPreviewIntervalMs
+    )
+    if (webmPreviewInFlightRef.current) return
+    if (!urgent && !awaitingFirst && now - lastWebmPreviewAtRef.current < minInterval) return
+    lastWebmPreviewAtRef.current = now
+    webmPreviewInFlightRef.current = true
+    const controller = new AbortController()
+    webmPreviewControllerRef.current = controller
+    const generation = generationRef.current
+    debugStatsRef.current.webmPreviewCount += 1
+    if (!longReadBoost && debugStatsRef.current.liveSource !== 'stream') {
+      debugStatsRef.current.liveSource = 'webm'
+    }
+    emitDebugStats()
+    void transcribeAudio(blob, controller.signal).then((text) => {
+      webmPreviewInFlightRef.current = false
+      if (controller.signal.aborted || generationRef.current !== generation) return
+      const trimmed = correctAsrText(text.trim())
+      if (trimmed) applyStreamPieces([trimmed])
+    }).catch(() => {
+      if (!controller.signal.aborted) webmPreviewInFlightRef.current = false
+    })
+  }, [applyStreamPieces, emitDebugStats])
+
+  const beginSpeechTiming = useCallback(() => {
+    stopLivePreviewLoop()
+    if (!streamLiveActiveRef.current) {
+      resetDebugStats()
+      speechStartedAtRef.current = performance.now()
+    }
+  }, [resetDebugStats, stopLivePreviewLoop])
+
+  /** 开口计时 + 长句 webm 补全环（合并入识别区，不取代 chunk 主路径） */
+  const beginLivePreview = useCallback(() => {
+    beginSpeechTiming()
+    const generation = generationRef.current
+    livePreviewGenerationRef.current = generation
+    const tick = () => {
+      if (livePreviewGenerationRef.current !== generationRef.current) return
+      const blob = latestWebmRef.current
+      if (blob && blob.size >= webmPreviewMinBytes) {
+        requestWebmPreview(blob, false, true)
+      }
+      livePreviewTimerRef.current = window.setTimeout(tick, longReadWebmIntervalMs)
+    }
+    livePreviewTimerRef.current = window.setTimeout(tick, longReadWebmFirstDelayMs)
+  }, [beginSpeechTiming, requestWebmPreview])
+
+  const pumpUploads = useCallback(() => {
+    const generation = generationRef.current
+    uploadQueueRef.current = uploadQueueRef.current.catch(() => undefined).then(async () => {
+      while (
+        generationRef.current === generation
+        && pendingChunksRef.current.length > 0
+      ) {
+        uploadInFlightRef.current = true
+        const pendingChunks = pendingChunksRef.current
+        pendingChunksRef.current = []
+        const blob = new Blob(pendingChunks, { type: 'audio/pcm' })
+        if (!blob.size) {
+          uploadInFlightRef.current = false
+          continue
+        }
+        pcmSentCountRef.current += 1
+        const sessionId = await startPromiseRef.current
+        if (!sessionId || generationRef.current !== generation) {
+          pendingChunksRef.current = pendingChunks.concat(pendingChunksRef.current)
+          uploadInFlightRef.current = false
+          if (!sessionId && startPromiseRef.current) {
+            void startPromiseRef.current.then(() => {
+              if (pendingChunksRef.current.length > 0) pumpUploads()
+            })
+          }
+          return
+        }
+        if (streamFailedRef.current) {
+          uploadInFlightRef.current = false
+          continue
+        }
+        try {
+          const pieces = await retryOnce(() => uploadAsrStreamChunk(
+            sessionId,
+            blob,
+            sessionControllerRef.current?.signal,
+          ))
+          chunkUploadFailuresRef.current = 0
+          armIdleCleanup(sessionId, generation)
+          debugStatsRef.current.streamChunkCount += 1
+          const hadStreamText = pieces.some((piece) => piece.trim())
+          if (hadStreamText) {
+            const prevChars = debugStatsRef.current.liveCharCount
+            applyStreamPieces(pieces)
+            debugStatsRef.current.streamTextHits += 1
+            if (debugStatsRef.current.liveCharCount <= prevChars) {
+              stagnantStreamHitsRef.current += 1
+            } else {
+              stagnantStreamHitsRef.current = 0
+            }
+            if (
+              stagnantStreamHitsRef.current >= 4
+              && latestWebmRef.current
+              && latestWebmRef.current.size >= webmPreviewMinBytes
+            ) {
+              stagnantStreamHitsRef.current = 0
+              requestWebmPreview(latestWebmRef.current, true, true)
+            }
+            emitDebugStats()
+          }
+        } catch {
+          pendingChunksRef.current = pendingChunks.concat(pendingChunksRef.current)
+          chunkUploadFailuresRef.current += 1
+          if (chunkUploadFailuresRef.current >= maxChunkUploadFailures) {
+            if (generationRef.current === generation) {
+              streamFailedRef.current = true
+              const fallbackBlob = latestWebmRef.current
+              if (fallbackBlob) requestWebmPreview(fallbackBlob, true)
+            }
+            uploadInFlightRef.current = false
+            return
+          }
+        }
+      }
+      uploadInFlightRef.current = false
+      if (
+        pendingChunksRef.current.length > 0
+        && generationRef.current === generation
+      ) {
+        pumpUploads()
+      }
+    })
+  }, [applyStreamPieces, armIdleCleanup, emitDebugStats, requestWebmPreview])
+
+  const flushPendingChunks = useCallback(() => {
+    clearChunkTimer()
+    if (pendingChunksRef.current.length === 0) return
+    pumpUploads()
+  }, [clearChunkTimer, pumpUploads])
+
+  const enqueueChunk = useCallback((blob: Blob) => {
+    if (!blob.size) return
+    if (blob.type !== 'audio/pcm') return
+    pendingChunksRef.current.push(blob)
+    const delay = pcmSentCountRef.current === 0 ? pcmFirstUploadDelayMs : pcmUploadBufferMs
+    if (uploadInFlightRef.current) {
+      if (!chunkTimerRef.current) {
+        chunkTimerRef.current = window.setTimeout(flushPendingChunks, delay)
+      }
+      return
+    }
+    if (delay === 0) {
+      flushPendingChunks()
+      return
+    }
+    if (chunkTimerRef.current) return
+    chunkTimerRef.current = window.setTimeout(flushPendingChunks, delay)
+  }, [flushPendingChunks])
+
+  /** 缓存累积 webm；长句定时 /asr 与收尾补全 */
+  const enqueueWebmSnapshot = useCallback((blob: Blob) => {
+    latestWebmRef.current = blob
+  }, [])
+
+  const finishSession = useCallback(async (fullRecording: Blob): Promise<StreamingAsrResult> => {
+    const generation = generationRef.current
+    const wholeAsrPromise = fullRecording.size >= finalAsrMinBytes
+      ? transcribeAudio(fullRecording).catch(() => '')
+      : Promise.resolve('')
+    await waitForPreviewIdle(() => webmPreviewInFlightRef.current, 2_000)
+    stopLivePreviewLoop()
+    const interimBeforeFlush = interimTextRef.current.trim()
+    const bestBeforeFlush = bestInterimRef.current.trim()
+    const peakBeforeFlush = peakRawMidRef.current.trim()
+    const accumBeforeFlush = liveAccumRef.current.trim()
+    const streamHitsBeforeFlush = debugStatsRef.current.streamTextHits
+    const streamWorked = streamHitsBeforeFlush > 0 || debugStatsRef.current.liveSource === 'stream'
+    clearIdleTimer()
+    flushPendingChunks()
+    const sessionId = await startPromiseRef.current
+    await waitWithTimeout(
+      uploadQueueRef.current.catch(() => undefined),
+      interimBeforeFlush || bestBeforeFlush ? 4_500 : 10_000,
+    )
+    const interimText = interimTextRef.current.trim() || interimBeforeFlush
+    const bestInterimText = pickLongestMerged(
+      bestInterimRef.current.trim().length >= bestBeforeFlush.length
+        ? bestInterimRef.current.trim()
+        : bestBeforeFlush,
+      peakBeforeFlush,
+      accumBeforeFlush,
+      interimText,
+    )
+    let finalText = ''
+
+    if (sessionId && generationRef.current === generation && !streamFailedRef.current) {
+      try {
+        if (interimText || bestInterimText) {
+          const quick = new AbortController()
+          const quickTimer = window.setTimeout(() => quick.abort(), 8_000)
+          try {
+            finalText = await endAsrStream(sessionId, quick.signal)
+          } finally {
+            window.clearTimeout(quickTimer)
+          }
+        } else {
+          finalText = await endAsrStream(sessionId)
+        }
+      } catch {
+        streamFailedRef.current = true
+      }
+    } else if (sessionId) {
+      void endAsrStream(sessionId).catch(() => undefined)
+    }
+
+    const endClean = correctAsrText(collapseRepeatedPhrases(finalText.trim()))
+    let chosen: { text: string; usedFallback: boolean }
+    let finalSource: StreamingAsrResult['finalSource'] = ''
+
+    if (endClean || bestInterimText || interimText) {
+      chosen = chooseFinalText(endClean, interimText, bestInterimText)
+      finalSource = endClean ? 'baidu-end' : (streamWorked ? 'baidu-stream' : 'webm-preview')
+    } else {
+      chosen = { text: '', usedFallback: true }
+    }
+
+    let wholeAsrText = ''
+
+    try {
+      wholeAsrText = correctAsrText(collapseRepeatedPhrases((await wholeAsrPromise).trim()))
+    } catch {
+      wholeAsrText = ''
+    }
+
+    if (wholeAsrText) {
+      const merged = chooseFinalText(endClean, wholeAsrText, bestInterimText)
+      chosen = { text: merged.text, usedFallback: merged.usedFallback }
+      if (wholeAsrText.length > endClean.length) finalSource = 'fallback-asr'
+    }
+
+    const absoluteBest = pickLongestMerged(
+      chosen.text,
+      wholeAsrText,
+      bestInterimText,
+      peakBeforeFlush,
+      accumBeforeFlush,
+      interimText,
+      endClean,
+    )
+    if (absoluteBest.length > chosen.text.length) {
+      chosen = { text: absoluteBest, usedFallback: chosen.usedFallback }
+      if (wholeAsrText.length >= chosen.text.length - 4) finalSource = 'fallback-asr'
+    }
+
+    if (chosen.text && generationRef.current === generation) {
+      const preview = correctAsrText(chosen.text)
+      interimTextRef.current = preview
+      bestInterimRef.current = preview
+      onInterimTextRef.current(preview)
+    }
+
+    resetSessionState(false)
+
+    if (fullRecording.size >= finalAsrMinBytes && !streamWorked && !endClean) {
+      try {
+        const fallbackText = correctAsrText(collapseRepeatedPhrases((await transcribeAudio(fullRecording)).trim()))
+        if (fallbackText && fallbackText.length > chosen.text.length) {
+          chosen = { text: fallbackText, usedFallback: true }
+          finalSource = 'fallback-asr'
+        }
+      } catch {
+        // 保持流式/预览结果
+      }
+    } else if (chosen.text) {
+      chosen = {
+        text: correctAsrText(collapseRepeatedPhrases(chosen.text)),
+        usedFallback: chosen.usedFallback,
+      }
+    }
+
+    if (!chosen.text && fullRecording.size >= finalAsrMinBytes) {
+      try {
+        return {
+          text: correctAsrText(collapseRepeatedPhrases(await transcribeAudio(fullRecording))),
+          usedFallback: true,
+          finalSource: 'fallback-asr',
+        }
+      } catch {
+        return { text: '', usedFallback: true, finalSource: '' }
+      }
+    }
+
+    if (chosen.text) return { ...chosen, finalSource }
+    return { text: '', usedFallback: true, finalSource: '' }
+  }, [clearIdleTimer, flushPendingChunks, resetSessionState, stopLivePreviewLoop])
+
+  const cleanupSession = useCallback(() => {
+    const pendingStart = startPromiseRef.current
+    const activeSessionId = sessionIdRef.current
+    generationRef.current += 1
+    resetSessionState(true)
+    if (activeSessionId) {
+      void endAsrStream(activeSessionId).catch(() => undefined)
+    } else {
+      void pendingStart?.then((sessionId) => {
+        if (sessionId) return endAsrStream(sessionId).catch(() => undefined)
+      })
+    }
+  }, [resetSessionState])
+
+  useEffect(() => cleanupSession, [cleanupSession])
+
+  return {
+    beginLivePreview,
+    beginSpeechTiming,
+    cleanupSession,
+    enqueueChunk,
+    enqueueWebmSnapshot,
+    finishSession,
+    prepareSession,
+    primeSession,
+    startSession,
+    stopLivePreview: stopLivePreviewLoop,
+  }
+}

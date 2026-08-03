@@ -1,0 +1,98 @@
+import { buildJarvisAuthHeaders, handleJarvisAuthResponse } from '../auth'
+import { createTimedRequest } from './request'
+
+export const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
+
+const DOC_EXTENSIONS = new Set(['pdf', 'docx', 'xlsx'])
+
+export interface DocUploadResult {
+  type?: string
+  filename: string
+  pages?: number
+  sheets?: number
+  text: string
+  truncated?: boolean
+}
+
+export function isDocumentFile(file: File): boolean {
+  const lowerName = file.name.toLowerCase()
+  const extension = lowerName.includes('.') ? lowerName.split('.').pop() ?? '' : ''
+  if (DOC_EXTENSIONS.has(extension)) return true
+  if (file.type === 'application/pdf') return true
+  if (file.type.includes('wordprocessingml')) return true
+  if (file.type.includes('spreadsheetml')) return true
+  return false
+}
+
+export function isImageFile(file: File): boolean {
+  return file.type.startsWith('image/')
+}
+
+export function collectClipboardFiles(items: DataTransferItemList): File[] {
+  const files: File[] = []
+  for (const item of Array.from(items)) {
+    if (item.kind !== 'file') continue
+    const file = item.getAsFile()
+    if (file) files.push(file)
+  }
+  return files
+}
+
+export interface PendingDocument {
+  id: string
+  filename: string
+  text: string
+  truncated?: boolean
+}
+
+export function buildDocumentAnalysisMessage(filename: string, text: string, truncated?: boolean) {
+  const suffix = truncated ? '\n\n（文档内容已截断）' : ''
+  return `📄 我上传了文档《${filename}》，请分析：\n\n${text}${suffix}`
+}
+
+/** 待发送文档解析块 + 用户输入，合并为一条消息的纯文本 */
+export function composeMessageTextWithDocuments(userText: string, documents: PendingDocument[]): string {
+  const docBlocks = documents.map((doc) => buildDocumentAnalysisMessage(doc.filename, doc.text, doc.truncated))
+  const docPart = docBlocks.join('\n\n')
+  const trimmedUser = userText.trim()
+  if (docPart && trimmedUser) return `${docPart}\n\n${trimmedUser}`
+  if (docPart) return docPart
+  return trimmedUser
+}
+
+export async function uploadDocument(file: File): Promise<DocUploadResult> {
+  const formData = new FormData()
+  formData.append('file', file)
+
+  const timedRequest = createTimedRequest()
+  try {
+    const response = handleJarvisAuthResponse(await fetch('/p/jarvis/doc/upload', {
+      method: 'POST',
+      headers: buildJarvisAuthHeaders(),
+      body: formData,
+      signal: timedRequest.signal,
+    }))
+
+    const payload = await response.json() as DocUploadResult & { error?: string; message?: string }
+    if (!response.ok) {
+      const message = payload.error ?? payload.message ?? `文档上传失败（${response.status}）`
+      throw new Error(message)
+    }
+
+    const filename = typeof payload.filename === 'string' && payload.filename.length > 0
+      ? payload.filename
+      : file.name
+    const text = typeof payload.text === 'string' ? payload.text : ''
+
+    return {
+      type: payload.type,
+      filename,
+      pages: payload.pages,
+      sheets: payload.sheets,
+      text,
+      truncated: Boolean(payload.truncated),
+    }
+  } finally {
+    timedRequest.dispose()
+  }
+}
