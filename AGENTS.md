@@ -99,10 +99,18 @@ versions/                             # 版本快照（每次修改复制改动�
 - `isDev` 判断（localhost/127.0.0.1）→ 免登录直接进主界面
 - VPS 部署（https://pmlophy.com）→ 正常登录流程
 
-## 当前状态（2026-08-05，v122）
+## 当前状态（2026-08-05，v129）
 
 | 版本 | 摘要 |
 |------|------|
+| v129 | APK TTS：`getApiBase()/tts` + 失败重试；API base 双检 + allowNavigation |
+| v128 | APK 近似跟嘴：录音中周期整段 /asr（1.2–1.8s）+ 收尾打字机 |
+| v127 | APK 专用打字机：固定 45ms/字 interval，不再复用流式摊时长 hook |
+| v126 | APK 识别区打字机：整段 /asr 后 45ms/字 reveal，发前等待动画 |
+| v125 | APK 识别区显示：`liveAsrText` 兜底 + thinking 期保留 streaming 面板 |
+| v124 | APK 语音：/asr 结果 flushSync 回填识别区并发送；原生 finishSession 加固 |
+| v122 | 发送即清空：`onSend` 同步 boolean + flushSync；对话请求异步后台执行 |
+| v124 | APK 语音：/asr 结果 flushSync 回填识别区并发送；原生 finishSession 加固 |
 | v122 | 发送即清空：`onSend` 同步 boolean + flushSync；对话请求异步后台执行 |
 | v121 | APK 语音：webm 整段 /asr；浏览器 PCM 流式不变；Composer 发送即清空（初版） |
 | v120 | APK 输入性能：Composer 状态下沉 + 消息列表 memo + 超 100 条懒渲染 |

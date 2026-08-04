@@ -36,17 +36,12 @@ const webmStreamFirstMinBytes = 1_200
 const webmStreamMinBytes = 3_500
 const webmStreamFirstWaitMs = 320
 const webmStreamWaitMs = 480
-/** webm /asr：chunk 无 MID 时的跟嘴兜底（仅浏览器降级；APK 用下方专用间隔） */
+/** webm /asr：chunk 无 MID 时的跟嘴兜底 */
 const webmPreviewIntervalMs = 480
 const webmPreviewIntervalWithInterimMs = 1_200
 const webmPreviewMinBytes = 900
 const webmPreviewFirstMinBytes = 400
 const webmPreviewFirstLaunchBytes = 2_000
-/** APK：录音中周期性整段 webm → POST /asr，近似跟嘴（非 asr-stream） */
-const apkWebmPreviewIntervalMs = 1_800
-const apkWebmPreviewFirstWaitMs = 1_200
-const apkWebmPreviewMinBytes = 2_400
-const apkWebmPreviewFirstMinBytes = 1_200
 const maxChunkUploadFailures = 3
 const finalAsrMinBytes = 3_000
 
@@ -514,39 +509,6 @@ export function useStreamingAsr({ onInterimText, onDebugStats }: UseStreamingAsr
     })
   }, [applyWebmTranscript, emitDebugStats])
 
-  /**
-   * APK 专用：累积 webm 整段 POST /asr。
-   * 上一次未返回前不发新请求；间隔约 1.2s（首包）/ 1.8s（后续）。
-   */
-  const requestApkWebmPreview = useCallback((blob: Blob) => {
-    if (!isCapacitorNative()) return
-    if (!blob.size) return
-    if (webmPreviewInFlightRef.current) return
-    const awaitingFirst = lastWebmPreviewAtRef.current === 0
-    const minBytes = awaitingFirst ? apkWebmPreviewFirstMinBytes : apkWebmPreviewMinBytes
-    if (blob.size < minBytes) return
-    const now = performance.now()
-    const minInterval = awaitingFirst ? apkWebmPreviewFirstWaitMs : apkWebmPreviewIntervalMs
-    if (!awaitingFirst && now - lastWebmPreviewAtRef.current < minInterval) return
-
-    lastWebmPreviewAtRef.current = now
-    webmPreviewInFlightRef.current = true
-    const controller = new AbortController()
-    webmPreviewControllerRef.current = controller
-    const generation = generationRef.current
-    debugStatsRef.current.webmPreviewCount += 1
-    debugStatsRef.current.liveSource = 'webm'
-    emitDebugStats()
-    void transcribeAudio(blob, controller.signal).then((text) => {
-      webmPreviewInFlightRef.current = false
-      if (controller.signal.aborted || generationRef.current !== generation) return
-      const trimmed = correctAsrText(collapseRepeatedPhrases(text.trim()))
-      if (trimmed) applyWebmTranscript(trimmed)
-    }).catch(() => {
-      if (!controller.signal.aborted) webmPreviewInFlightRef.current = false
-    })
-  }, [applyWebmTranscript, emitDebugStats])
-
   const beginSpeechTiming = useCallback(() => {
     stopLivePreviewLoop()
     if (!streamLiveActiveRef.current && debugStatsRef.current.streamChunkCount === 0) {
@@ -558,18 +520,13 @@ export function useStreamingAsr({ onInterimText, onDebugStats }: UseStreamingAsr
   }, [resetDebugStats, stopLivePreviewLoop])
 
   /**
-   * 开口计时。
-   * 浏览器：录音中只靠 chunk MID 跟嘴；webm /asr 仅流式失败兜底。
-   * APK：无 PCM 流式，靠累积 webm 周期 /asr 近似跟嘴。
+   * 开口计时。录音中**只**用 chunk MID 跟嘴：
+   * 后端已按会话累积文本，中途再插 webm `/asr` 会把显示顶到 chunk 前面，
+   * 之后 chunk 的累积文本反而被当成「更短」而全部拒绝，造成十几秒卡死。
+   * webm 仅保留为流式彻底失败时的降级路径。
    */
   const beginLivePreview = useCallback(() => {
     beginSpeechTiming()
-    if (isCapacitorNative()) {
-      lastWebmPreviewAtRef.current = 0
-      webmPreviewControllerRef.current?.abort()
-      webmPreviewControllerRef.current = null
-      webmPreviewInFlightRef.current = false
-    }
   }, [beginSpeechTiming])
 
   const pumpUploads = useCallback(() => {
@@ -702,8 +659,6 @@ export function useStreamingAsr({ onInterimText, onDebugStats }: UseStreamingAsr
       latestWebmRef.current = new Blob(streamWebmBufferRef.current, {
         type: streamWebmBufferRef.current[0]?.type || 'audio/webm',
       })
-      // APK：录音中周期性整段 /asr，刷新识别区（不走 asr-stream/chunk）
-      requestApkWebmPreview(latestWebmRef.current)
       return
     }
 
@@ -718,7 +673,7 @@ export function useStreamingAsr({ onInterimText, onDebugStats }: UseStreamingAsr
     }
     if (chunkTimerRef.current) return
     chunkTimerRef.current = window.setTimeout(flushStreamWebmBuffer, waitMs)
-  }, [flushPendingChunks, flushStreamWebmBuffer, requestApkWebmPreview])
+  }, [flushPendingChunks, flushStreamWebmBuffer])
 
   /** 缓存累积 webm；长句定时 /asr 与收尾补全 */
   const enqueueWebmSnapshot = useCallback((blob: Blob) => {
@@ -732,10 +687,6 @@ export function useStreamingAsr({ onInterimText, onDebugStats }: UseStreamingAsr
       stopLivePreviewLoop()
       clearIdleTimer()
       clearChunkTimer()
-      // 收尾前丢弃在途预览，避免短结果盖过最终全文
-      webmPreviewControllerRef.current?.abort()
-      webmPreviewControllerRef.current = null
-      webmPreviewInFlightRef.current = false
       const activeSessionId = sessionIdRef.current
       const pendingStart = startPromiseRef.current
       sessionControllerRef.current = null
@@ -755,12 +706,6 @@ export function useStreamingAsr({ onInterimText, onDebugStats }: UseStreamingAsr
       const recordingBlob = webmCandidates.length === 0
         ? fullRecording
         : webmCandidates.reduce((best, blob) => (blob.size > best.size ? blob : best))
-      const interimBeforeFinal = pickLongestMerged(
-        interimTextRef.current,
-        bestInterimRef.current,
-        sessionDisplayRef.current,
-        liveAccumRef.current,
-      )
       let text = ''
       if (recordingBlob.size > 0) {
         try {
@@ -770,7 +715,6 @@ export function useStreamingAsr({ onInterimText, onDebugStats }: UseStreamingAsr
           text = ''
         }
       }
-      text = pickLongestMerged(text, interimBeforeFinal)
       if (text) {
         interimTextRef.current = text
         bestInterimRef.current = text

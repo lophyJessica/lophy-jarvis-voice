@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from 'react'
+import { flushSync } from 'react-dom'
 import {
   AudioOutlined,
   CheckCircleOutlined,
@@ -53,7 +54,7 @@ import { copyTextToClipboard } from './utils/clipboard'
 import { readImageFiles } from './utils/images'
 import { cleanSpeechText } from './utils/ttsSentences'
 import { buildComposerMessageContent, buildMessageContent, getMessageText } from './types/messages'
-import { isBrowserDevMode, isCapacitorNative } from './utils/platform'
+import { isBrowserDevMode } from './utils/platform'
 import './App.css'
 
 type ConnectionState = 'checking' | 'online' | 'offline'
@@ -65,8 +66,6 @@ const assistantName = '罗宾'
 const modeStorageKey = 'robin-mode'
 const ttsAutoPlayStorageKey = 'robin-tts-autoplay'
 const maxSavedMessages = 200
-/** APK 整段识别完成后，识别区逐字展开速度（非真流式） */
-const APK_ASR_CHAR_REVEAL_MS = 45
 
 function readTtsAutoPlay() {
   return localStorage.getItem(ttsAutoPlayStorageKey) !== '0'
@@ -114,17 +113,12 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   const [docUploads, setDocUploads] = useState<Array<{ id: string; filename: string }>>([])
   const [transcript, setTranscript] = useState('')
   const [streamingTranscript, setStreamingTranscript] = useState('')
-  /** APK 识别全文（录音中周期 /asr + 收尾）；打字机只读 reveal 串 */
-  const [apkAsrFullText, setApkAsrFullText] = useState('')
-  const [apkAsrRevealText, setApkAsrRevealText] = useState('')
-  const [apkRevealActive, setApkRevealActive] = useState(false)
   const [streamingDebug, setStreamingDebug] = useState<StreamingAsrDebugStats | null>(null)
   const [streamingText, setStreamingText] = useState('')
   const [status, setStatus] = useState<JarvisStatus>('idle')
   const liveAsrText = streamingTranscript || transcript
   const followAlongEnabled = status === 'recording' || status === 'transcribing'
   const displayedAsrText = useTypewriterFollowAlong(liveAsrText, followAlongEnabled)
-  const apkAsrRevealTimerRef = useRef(0)
   const [connectionState, setConnectionState] = useState<ConnectionState>('checking')
   const [historySyncState, setHistorySyncState] = useState<HistorySyncState>('syncing')
   const [copiedKey, setCopiedKey] = useState('')
@@ -154,65 +148,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   const ttsAutoPlayRef = useRef(ttsAutoPlay)
   const suppressVadRef = useRef<(durationMs: number) => void>(() => undefined)
   const copyResetTimerRef = useRef(0)
-
-  const clearApkAsrReveal = useCallback(() => {
-    window.clearInterval(apkAsrRevealTimerRef.current)
-    apkAsrRevealTimerRef.current = 0
-    setApkRevealActive(false)
-    setApkAsrFullText('')
-    setApkAsrRevealText('')
-  }, [])
-
-  /**
-   * APK 收尾专用：固定 45ms/字从空串逐字 reveal（不用 useTypewriterFollowAlong）。
-   * 录音中的周期 /asr 结果走 applyAsrLiveText 实时替换显示。
-   */
-  const revealApkAsrText = useCallback((fullText: string) => {
-    const trimmed = fullText.trim()
-    window.clearInterval(apkAsrRevealTimerRef.current)
-    apkAsrRevealTimerRef.current = 0
-    setApkAsrFullText(trimmed)
-    setTranscript(trimmed)
-    if (!trimmed) {
-      setApkRevealActive(false)
-      setApkAsrRevealText('')
-      return Promise.resolve()
-    }
-    setApkRevealActive(true)
-    setApkAsrRevealText('')
-
-    return new Promise<void>((resolve) => {
-      let index = 0
-      apkAsrRevealTimerRef.current = window.setInterval(() => {
-        index += 1
-        if (index >= trimmed.length) {
-          window.clearInterval(apkAsrRevealTimerRef.current)
-          apkAsrRevealTimerRef.current = 0
-          setApkAsrRevealText(trimmed)
-          setApkRevealActive(false)
-          resolve()
-          return
-        }
-        setApkAsrRevealText(trimmed.slice(0, index))
-      }, APK_ASR_CHAR_REVEAL_MS)
-    })
-  }, [])
-
-  const applyAsrLiveText = useCallback((text: string) => {
-    const trimmed = text.trim()
-    if (!trimmed) {
-      setStreamingTranscript('')
-      if (isCapacitorNative()) clearApkAsrReveal()
-      return
-    }
-    // APK 录音中周期 /asr：实时替换识别区；收尾打字机由 revealApkAsrText 接管。
-    if (isCapacitorNative()) {
-      setApkAsrFullText(trimmed)
-      setTranscript(trimmed)
-      return
-    }
-    setStreamingTranscript(trimmed)
-  }, [clearApkAsrReveal])
   const {
     speak,
     warmUpSpeech,
@@ -234,7 +169,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     primeSession: primeStreamingAsr,
     releaseIdleSession: releaseIdleStreamingAsr,
   } = useStreamingAsr({
-    onInterimText: applyAsrLiveText,
+    onInterimText: setStreamingTranscript,
     onDebugStats: vadQaDebug ? setStreamingDebug : undefined,
   })
 
@@ -445,13 +380,12 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   }, [beginStreamingLivePreview, cancelSpeech, primeStreamingAsr])
 
   const handleVadSpeechStart = useCallback(() => {
-    clearApkAsrReveal()
     setTranscript('')
     setStreamingTranscript('')
     setStreamingText('')
     beginStreamingLivePreview()
     transitionTo('recording')
-  }, [beginStreamingLivePreview, clearApkAsrReveal, transitionTo])
+  }, [beginStreamingLivePreview, transitionTo])
 
   const handleVadSpeechEnd = useCallback(() => {
     if (statusRef.current === 'recording') transitionTo('transcribing')
@@ -462,27 +396,31 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
       const { text } = await finishStreamingAsr(blob)
       const recognized = text.trim()
       if (!recognized) {
-        applyAsrLiveText('')
+        flushSync(() => {
+          setStreamingTranscript('')
+          setTranscript('')
+        })
         transitionTo('idle')
         void messageApi.info(blob.size ? '没有识别到语音，请再试一次' : '没有录到有效音频，请再试一次')
         return
       }
-      if (isCapacitorNative()) {
-        // 专用打字机：等逐字完成后再发送（肉眼可见 45ms/字）
-        await revealApkAsrText(recognized)
-      } else {
-        applyAsrLiveText(recognized)
-      }
+      flushSync(() => {
+        setStreamingTranscript(recognized)
+        setTranscript(recognized)
+      })
       const sent = await sendMessage(recognized, [])
-      if (sent && statusRef.current === 'idle') {
-        applyAsrLiveText('')
+      if (sent) {
+        flushSync(() => {
+          setTranscript('')
+          setStreamingTranscript('')
+        })
       }
     } catch (error) {
       const fallback = error instanceof HermesError ? error.message : '录音处理失败，请重试'
       transitionTo('idle')
       void messageApi.error(fallback)
     }
-  }, [applyAsrLiveText, finishStreamingAsr, messageApi, revealApkAsrText, sendMessage, transitionTo])
+  }, [finishStreamingAsr, messageApi, sendMessage, transitionTo])
 
   const canVadStartSpeech = useCallback(() => (
     modeRef.current === 'voice'
@@ -556,14 +494,13 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     // 仅退出语音模式：不停播报、不 abort 请求；发消息/停止/开麦说话等其它操作仍会终止
     stopVad()
     cleanupStreamingAsr()
-    clearApkAsrReveal()
     setTranscript('')
     setStreamingTranscript('')
     if (statusRef.current !== 'speaking' && statusRef.current !== 'thinking') {
       setStreamingText('')
       transitionTo('idle')
     }
-  }, [cleanupStreamingAsr, clearApkAsrReveal, stopVad, transitionTo])
+  }, [cleanupStreamingAsr, stopVad, transitionTo])
 
   const appendImages = useCallback(async (files: FileList | File[]) => {
     try {
@@ -729,7 +666,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     cancelSpeech()
     stopVad()
     window.clearTimeout(copyResetTimerRef.current)
-    window.clearInterval(apkAsrRevealTimerRef.current)
   }, [cancelSpeech, stopVad])
 
   const clearConversation = useCallback(async () => {
@@ -739,7 +675,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     messagesRef.current = []
     setMessages([])
     setHistory([])
-    clearApkAsrReveal()
     setTranscript('')
     setStreamingTranscript('')
     setStreamingText('')
@@ -757,7 +692,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
       console.error('Robin history clear failed', historyError)
       setHistorySyncState('fallback')
     }
-  }, [cancelSpeech, clearApkAsrReveal, transitionTo])
+  }, [cancelSpeech, transitionTo])
 
   const handleMessageScroll = useCallback((event: UIEvent<HTMLElement>) => {
     const messageList = event.currentTarget
@@ -834,24 +769,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     synced: { color: 'success', text: '云端已同步' },
     fallback: { color: 'warning', text: '本地兜底' },
   }[historySyncState]
-
-  const voiceAsrPlaceholder = status === 'transcribing'
-    ? '收尾识别中…'
-    : status === 'recording'
-      ? '正在识别…'
-      : vadListening ? '正在监听你的声音…' : '等待麦克风…'
-  const voiceAsrFollowAlong = status === 'recording' || status === 'transcribing'
-  // APK：录音中显示周期 /asr 全文；收尾打字机期间只显示 reveal，避免闪回全文
-  const voiceAsrDisplayText = isCapacitorNative()
-    ? (apkRevealActive ? apkAsrRevealText : (apkAsrRevealText || apkAsrFullText || transcript))
-    : voiceAsrFollowAlong
-      ? (displayedAsrText || liveAsrText)
-      : liveAsrText
-  const nativeAsrPanelActive = isCapacitorNative() && (apkAsrFullText.length > 0 || apkAsrRevealText.length > 0)
-  const showVoiceAsrPanel = status === 'recording'
-    || status === 'transcribing'
-    || (liveAsrText && (status === 'thinking' || status === 'speaking'))
-    || (nativeAsrPanelActive && (status === 'thinking' || status === 'speaking'))
 
   return (
     <main className="jarvis-shell">
@@ -993,13 +910,13 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
           <section className="voice-live-panel" aria-live="polite">
             <div className="live-block live-block-asr">
               <span className="live-label">识别文本</span>
-              {showVoiceAsrPanel ? (
-                <div className={`streaming-asr-panel ${voiceAsrDisplayText ? 'has-text' : ''}`} data-testid="streaming-asr-text">
-                  <span className="streaming-asr-status"><i />{status === 'transcribing' ? '收尾识别' : status === 'thinking' ? '已识别' : '识别中'}</span>
-                  <p>{voiceAsrDisplayText || voiceAsrPlaceholder}</p>
+              {(status === 'recording' || status === 'transcribing') ? (
+                <div className={`streaming-asr-panel ${liveAsrText ? 'has-text' : ''}`} data-testid="streaming-asr-text">
+                  <span className="streaming-asr-status"><i />{status === 'transcribing' ? '收尾识别' : '识别中'}</span>
+                  <p>{displayedAsrText || '正在等待实时识别结果…'}</p>
                 </div>
               ) : (
-                <p>{voiceAsrPlaceholder}</p>
+                <p>{transcript || (vadListening ? '正在监听你的声音…' : '等待麦克风…')}</p>
               )}
               <div className="volume-waveform" data-testid="volume-waveform" aria-label={`当前音量 ${vadVolume.toFixed(3)}`}>
                 {Array.from({ length: 12 }, (_, index) => (

@@ -114,10 +114,9 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   const [docUploads, setDocUploads] = useState<Array<{ id: string; filename: string }>>([])
   const [transcript, setTranscript] = useState('')
   const [streamingTranscript, setStreamingTranscript] = useState('')
-  /** APK 识别全文（录音中周期 /asr + 收尾）；打字机只读 reveal 串 */
+  /** APK 识别全文（保留至 idle）；打字机只读 reveal 串，不用 useTypewriterFollowAlong */
   const [apkAsrFullText, setApkAsrFullText] = useState('')
   const [apkAsrRevealText, setApkAsrRevealText] = useState('')
-  const [apkRevealActive, setApkRevealActive] = useState(false)
   const [streamingDebug, setStreamingDebug] = useState<StreamingAsrDebugStats | null>(null)
   const [streamingText, setStreamingText] = useState('')
   const [status, setStatus] = useState<JarvisStatus>('idle')
@@ -158,28 +157,22 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   const clearApkAsrReveal = useCallback(() => {
     window.clearInterval(apkAsrRevealTimerRef.current)
     apkAsrRevealTimerRef.current = 0
-    setApkRevealActive(false)
     setApkAsrFullText('')
     setApkAsrRevealText('')
   }, [])
 
   /**
-   * APK 收尾专用：固定 45ms/字从空串逐字 reveal（不用 useTypewriterFollowAlong）。
-   * 录音中的周期 /asr 结果走 applyAsrLiveText 实时替换显示。
+   * APK 专用：固定 45ms/字从空串逐字 reveal（不用 useTypewriterFollowAlong）。
+   * 流式 hook 按「增量摊时长」设计，整段一次到位会把 charMs 压到极短，肉眼等同全量出现。
    */
   const revealApkAsrText = useCallback((fullText: string) => {
     const trimmed = fullText.trim()
     window.clearInterval(apkAsrRevealTimerRef.current)
     apkAsrRevealTimerRef.current = 0
     setApkAsrFullText(trimmed)
-    setTranscript(trimmed)
-    if (!trimmed) {
-      setApkRevealActive(false)
-      setApkAsrRevealText('')
-      return Promise.resolve()
-    }
-    setApkRevealActive(true)
     setApkAsrRevealText('')
+    setTranscript(trimmed)
+    if (!trimmed) return Promise.resolve()
 
     return new Promise<void>((resolve) => {
       let index = 0
@@ -189,7 +182,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
           window.clearInterval(apkAsrRevealTimerRef.current)
           apkAsrRevealTimerRef.current = 0
           setApkAsrRevealText(trimmed)
-          setApkRevealActive(false)
           resolve()
           return
         }
@@ -205,7 +197,8 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
       if (isCapacitorNative()) clearApkAsrReveal()
       return
     }
-    // APK 录音中周期 /asr：实时替换识别区；收尾打字机由 revealApkAsrText 接管。
+    // APK 全文只写入 transcript 兜底；真正的逐字由 revealApkAsrText 驱动。
+    // finishSession 的 onInterimText 也会进这里：仅记全文，不立刻灌满 reveal。
     if (isCapacitorNative()) {
       setApkAsrFullText(trimmed)
       setTranscript(trimmed)
@@ -838,12 +831,11 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   const voiceAsrPlaceholder = status === 'transcribing'
     ? '收尾识别中…'
     : status === 'recording'
-      ? '正在识别…'
+      ? (isCapacitorNative() ? '录音中，结束后识别…' : '正在等待实时识别结果…')
       : vadListening ? '正在监听你的声音…' : '等待麦克风…'
   const voiceAsrFollowAlong = status === 'recording' || status === 'transcribing'
-  // APK：录音中显示周期 /asr 全文；收尾打字机期间只显示 reveal，避免闪回全文
   const voiceAsrDisplayText = isCapacitorNative()
-    ? (apkRevealActive ? apkAsrRevealText : (apkAsrRevealText || apkAsrFullText || transcript))
+    ? apkAsrRevealText
     : voiceAsrFollowAlong
       ? (displayedAsrText || liveAsrText)
       : liveAsrText
