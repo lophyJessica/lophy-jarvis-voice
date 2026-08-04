@@ -99,10 +99,17 @@ versions/                             # 版本快照（每次修改复制改动�
 - `isDev` 判断（localhost/127.0.0.1）→ 免登录直接进主界面
 - VPS 部署（https://pmlophy.com）→ 正常登录流程
 
-## 当前状态（2026-08-04，v115）
+## 当前状态（2026-08-05，v122）
 
 | 版本 | 摘要 |
 |------|------|
+| v122 | 发送即清空：`onSend` 同步 boolean + flushSync；对话请求异步后台执行 |
+| v121 | APK 语音：webm 整段 /asr；浏览器 PCM 流式不变；Composer 发送即清空（初版） |
+| v120 | APK 输入性能：Composer 状态下沉 + 消息列表 memo + 超 100 条懒渲染 |
+| v119 | APK 语音：跳过 AudioWorklet，MediaRecorder webm 走 asr-stream/chunk |
+| v118 | Capacitor APK：`getApiBase()` 走 `https://pmlophy.com`；桌面应用名改为 Robin |
+| v117 | Capacitor APK：排除原生壳 isDev 误判 + Android 麦克风 manifest 权限 |
+| v116 | 微信内置浏览器检测：MicroMessenger UA 顶部可关闭 Alert，提示用系统浏览器打开 |
 | v115 | 项目结构整理：所有前后端代码归入 app/，根目录保留文档、规范与历史快照 |
 | v114 | 修滑块不可见：composer 让出 14px 滚动条列 + 深灰 thumb |
 | v113 | ChatGPT 式滚动条：灰轨常驻 + 15px 圆角滑块，去除暗色透明条冲突 |

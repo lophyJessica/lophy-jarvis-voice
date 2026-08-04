@@ -1,0 +1,126 @@
+import { memo, useMemo, useState, type UIEvent } from 'react'
+import { Button, Empty, Tooltip } from 'antd'
+import { CheckOutlined, CopyOutlined } from '@ant-design/icons'
+import type { StoredMessage } from '../db'
+import ChatMessageRow from './ChatMessageRow'
+import { MessageRichContent } from './MessageRichContent'
+
+const MESSAGE_RENDER_CAP = 100
+
+interface MessageListViewProps {
+  assistantLabel: string
+  copiedKey: string
+  expandedMessageIds: Set<string>
+  isVoiceMode: boolean
+  messageListRef: React.RefObject<HTMLElement | null>
+  messages: StoredMessage[]
+  streamingText: string
+  onCopy: (text: string, key: string, sourceElement?: HTMLTextAreaElement | null) => void
+  onScroll: (event: UIEvent<HTMLElement>) => void
+  onToggleExpand: (id: string) => void
+}
+
+function formatMessageDisplayTime(createdAt: string) {
+  const parsed = Date.parse(createdAt)
+  if (Number.isNaN(parsed)) return '--:--'
+  return new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date(parsed))
+}
+
+const MessageListView = memo(function MessageListView({
+  assistantLabel,
+  copiedKey,
+  expandedMessageIds,
+  isVoiceMode,
+  messageListRef,
+  messages,
+  streamingText,
+  onCopy,
+  onScroll,
+  onToggleExpand,
+}: MessageListViewProps) {
+  const [showAllMessages, setShowAllMessages] = useState(false)
+  const hiddenCount = messages.length > MESSAGE_RENDER_CAP && !showAllMessages
+    ? messages.length - MESSAGE_RENDER_CAP
+    : 0
+
+  const renderedMessages = useMemo(() => {
+    if (hiddenCount === 0) return messages
+    return messages.slice(-MESSAGE_RENDER_CAP)
+  }, [hiddenCount, messages])
+
+  return (
+    <div className="message-list-shell">
+      <section
+        ref={messageListRef}
+        className="message-list"
+        data-testid="message-list"
+        tabIndex={0}
+        aria-label="聊天历史"
+        aria-live="polite"
+        onScroll={onScroll}
+      >
+        {hiddenCount > 0 && (
+          <div className="message-list-cap-banner">
+            <span>较早 {hiddenCount} 条未显示（减轻输入卡顿）</span>
+            <Button type="link" size="small" onClick={() => setShowAllMessages(true)}>
+              显示全部
+            </Button>
+          </div>
+        )}
+        {messages.length === 0 && !streamingText ? (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={isVoiceMode ? '直接对罗宾说话即可开始' : '输入文字或粘贴图片，开始与罗宾对话'}
+          />
+        ) : (
+          renderedMessages.map((chatMessage) => (
+            <ChatMessageRow
+              key={chatMessage.id}
+              chatMessage={chatMessage}
+              assistantLabel={assistantLabel}
+              displayTime={formatMessageDisplayTime(chatMessage.createdAt)}
+              expanded={expandedMessageIds.has(chatMessage.id)}
+              copied={copiedKey === chatMessage.id}
+              onToggleExpand={onToggleExpand}
+              onCopy={onCopy}
+            />
+          ))
+        )}
+        {streamingText && (
+          <article className="message-row assistant streaming">
+            <div className="message-meta">
+              <span>{assistantLabel}</span>
+              <time>实时回复</time>
+              <Tooltip title={copiedKey === 'streaming' ? '已复制' : '复制消息'}>
+                <Button
+                  className="message-copy-button"
+                  type="text"
+                  size="small"
+                  shape="circle"
+                  icon={copiedKey === 'streaming' ? <CheckOutlined /> : <CopyOutlined />}
+                  onClick={() => void onCopy(streamingText, 'streaming')}
+                  aria-label="复制实时回复"
+                />
+              </Tooltip>
+            </div>
+            <div className="message-bubble message-content streaming-bubble">
+              <MessageRichContent
+                content={streamingText}
+                className="expand-content message-markdown"
+                onCopy={(text) => void onCopy(text, 'streaming')}
+              />
+              <span className="stream-caret" />
+            </div>
+          </article>
+        )}
+      </section>
+    </div>
+  )
+})
+
+export default MessageListView

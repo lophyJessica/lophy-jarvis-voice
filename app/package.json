@@ -11,6 +11,9 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
     "antd": "^6.0.0",
     "dexie": "^4.4.4",
     "dompurify": "^3.4.12",
