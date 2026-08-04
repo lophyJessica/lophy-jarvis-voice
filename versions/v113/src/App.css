@@ -1407,7 +1407,6 @@
 }
 
 .conversation-panel > .ant-card-body {
-  position: relative;
   height: 100%;
   min-height: 0;
   padding: 0;
@@ -1676,27 +1675,27 @@
   /* ChatGPT 式：灰轨常驻 + 圆角滑块，贴视口最右侧 */
   scrollbar-gutter: stable;
   scrollbar-width: auto;
-  scrollbar-color: #5c5c5c #ececec;
+  scrollbar-color: #8e8e93 #ececec;
 }
 
 .message-list::-webkit-scrollbar {
-  width: 14px;
-  background-color: #ececec;
+  width: 15px;
 }
 
 .message-list::-webkit-scrollbar-track {
-  background-color: #ececec;
+  background: #ececec;
 }
 
 .message-list::-webkit-scrollbar-thumb {
-  min-height: 48px;
+  min-height: 40px;
   border: 3px solid #ececec;
   border-radius: 999px;
-  background-color: #5c5c5c;
+  background: #8e8e93;
+  background-clip: padding-box;
 }
 
 .message-list::-webkit-scrollbar-thumb:hover {
-  background-color: #3d3d3d;
+  background: #6b7280;
 }
 
 .message-list .ant-empty {
@@ -1822,13 +1821,13 @@
 .composer {
   position: absolute;
   z-index: 9;
-  right: 14px; /* 让出滚动条列，避免滑块被输入区遮住 */
+  right: 0;
   bottom: 0;
   left: 0;
   flex-direction: column;
   flex-wrap: nowrap;
   align-items: center;
-  width: auto;
+  width: 100%;
   padding: 14px 24px calc(22px + env(safe-area-inset-bottom, 0px));
   border: 0;
   background: linear-gradient(180deg, rgba(253, 252, 252, 0), #fdfcfc 24%);

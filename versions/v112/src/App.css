@@ -539,14 +539,31 @@
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-color: rgba(96, 165, 250, 0.28) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
 }
 
 .message-list-shell {
   position: relative;
   flex: 1 1 auto;
-  width: 100%;
   min-height: 0;
   overflow: hidden;
+}
+
+.message-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.message-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.message-list::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.34);
+  background-clip: padding-box;
 }
 
 .message-list .ant-empty {
@@ -1407,7 +1424,6 @@
 }
 
 .conversation-panel > .ant-card-body {
-  position: relative;
   height: 100%;
   min-height: 0;
   padding: 0;
@@ -1669,34 +1685,28 @@
   height: 100%;
   width: 100%;
   margin: 0;
-  overflow-x: hidden;
   overflow-y: scroll;
   padding: 34px max(24px, calc(50% - 396px)) 150px;
   color: #202123;
-  /* ChatGPT 式：灰轨常驻 + 圆角滑块，贴视口最右侧 */
-  scrollbar-gutter: stable;
+  scrollbar-color: #9ca3af #f3f4f6;
+  scrollbar-gutter: auto;
   scrollbar-width: auto;
-  scrollbar-color: #5c5c5c #ececec;
 }
 
 .message-list::-webkit-scrollbar {
-  width: 14px;
-  background-color: #ececec;
-}
-
-.message-list::-webkit-scrollbar-track {
-  background-color: #ececec;
+  width: 12px;
 }
 
 .message-list::-webkit-scrollbar-thumb {
-  min-height: 48px;
-  border: 3px solid #ececec;
+  border: 3px solid #f3f4f6;
   border-radius: 999px;
-  background-color: #5c5c5c;
+  background: #9ca3af;
+  background-clip: padding-box;
 }
 
-.message-list::-webkit-scrollbar-thumb:hover {
-  background-color: #3d3d3d;
+.message-list::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: #f3f4f6;
 }
 
 .message-list .ant-empty {
@@ -1822,13 +1832,13 @@
 .composer {
   position: absolute;
   z-index: 9;
-  right: 14px; /* 让出滚动条列，避免滑块被输入区遮住 */
+  right: 0;
   bottom: 0;
   left: 0;
   flex-direction: column;
   flex-wrap: nowrap;
   align-items: center;
-  width: auto;
+  width: 100%;
   padding: 14px 24px calc(22px + env(safe-area-inset-bottom, 0px));
   border: 0;
   background: linear-gradient(180deg, rgba(253, 252, 252, 0), #fdfcfc 24%);
