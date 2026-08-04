@@ -11,4 +11,4 @@ alwaysApply: true
 2. 更新 `AGENTS.md` → `## 当前状态`
 3. 回复用户时必须出现：**v{n}**、**改动文件**、**build**、**jarvis-voice.zip**（含 **mtime**，与 build 同轮更新，见 `AGENTS.md` §2.1）
 
-默认：每轮对外汇报前同轮执行 `npm run build` 并更新 `jarvis-voice.zip`，不得沿用旧 zip 时间戳。
+默认：每轮对外汇报前同轮执行 `cd app && npm run build` 并更新 `jarvis-voice.zip`，不得沿用旧 zip 时间戳。

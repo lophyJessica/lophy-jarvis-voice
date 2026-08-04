@@ -26,18 +26,23 @@
 ## 目录结构
 
 ```
-src/
-├── hooks/
-│   ├── useVoiceActivityDetector.ts   # VAD 免按钮（音量检测）
-│   ├── useStreamingAsr.ts            # 流式 ASR（PCM 320ms 批次上传）
-│   └── useTts.ts                     # Edge TTS 播报
-├── utils/
-│   ├── markdown.ts                   # marked + DOMPurify 渲染
+app/
+├── src/
+│   ├── hooks/
+│   │   ├── useVoiceActivityDetector.ts   # VAD 免按钮（音量检测）
+│   │   ├── useStreamingAsr.ts            # 流式 ASR（PCM 320ms 批次上传）
+│   │   └── useTts.ts                     # Edge TTS 播报
+│   ├── utils/
+│   │   ├── markdown.ts                   # marked + DOMPurify 渲染
+│   │   └── ...
+│   ├── App.tsx                           # 主框架
 │   └── ...
-├── App.tsx                           # 主框架
-└── ...
-public/
-└── pcm-capture-worklet.js            # AudioWorklet PCM 采集（128帧/16k重采样）
+├── public/
+│   └── pcm-capture-worklet.js            # AudioWorklet PCM 采集（128帧/16k重采样）
+├── server/                               # Python 后端与测试
+├── index.html
+├── package.json
+└── vite.config.ts
 versions/                             # 版本快照（每次修改复制改动文件，n 递增）
 ```
 
@@ -45,7 +50,7 @@ versions/                             # 版本快照（每次修改复制改动�
 
 ### 1. 版本标识（强制）
 - 项目根目录 `versions/` 目录
-- 每完成一轮修改，把**本轮改动的文件**复制到 `versions/v{n}/`（n 递增）
+- 每完成一轮修改，把**本轮改动的文件**复制到 `versions/v{n}/`（n 递增，源码保留 `app/` 相对路径）
 - 同轮必须写 `versions/v{n}/README.md`，并**更新本文件 `## 当前状态` 的版本号与摘要表**（见 `.cursor/rules/version-sync.mdc`）
 - **全局双保险**：`~/.cursor/rules/lophy-jarvis-voice-*.mdc` + 可选粘贴 `context/CURSOR-USER-RULES.md` 到 Cursor User Rules
 - 旧版本文件**不删除**，保留完整历史
@@ -53,16 +58,16 @@ versions/                             # 版本快照（每次修改复制改动�
 - 回滚 = 把 `versions/v{n-1}/` 文件复制回源码位置
 
 ### 2. 浏览器自查（强制）
-- 每次改完必须 `npm run build` + 内置浏览器打开 `http://127.0.0.1:5188/` 自查
+- 每次改完必须 `cd app && npm run build` + 内置浏览器打开 `http://127.0.0.1:5188/` 自查
 - 自查项：功能是否生效、Console 无报错、Network 请求正常、截图留证
 - 不许只看代码断言"应该没问题"
 
 ### 2.1 交付打包（强制，与对外汇报同轮）
 
 - **对外汇报前（同一轮对话内、写总结之前）**必须依次执行：
-  1. `npm run build`（通过后再打包）
+  1. `cd app && npm run build`（通过后再打包）
   2. 更新根目录 **`jarvis-voice.zip`**
-- 命令：`rm -f jarvis-voice.zip && cd dist && zip -rq ../jarvis-voice.zip .`（对 `dist/` 根目录压缩，解压即部署根）
+- 命令（仓库根目录执行）：`rm -f jarvis-voice.zip && cd app/dist && zip -rq ../../jarvis-voice.zip .`（对 `app/dist/` 根目录压缩，解压即部署根）
 - **汇报中必须写明 zip 的 mtime**（与 build 同轮），例如执行 `ls -la jarvis-voice.zip` 或 `date` 后的时间；可附带大小 / 主 bundle 文件名（如 `index-*.js`）
 - **禁止**在较早轮次打过 zip 后，仅改代码或仅文字汇报而不重新 build + zip；用户看到的「完成时间」应与 zip 修改时间一致
 
@@ -94,10 +99,11 @@ versions/                             # 版本快照（每次修改复制改动�
 - `isDev` 判断（localhost/127.0.0.1）→ 免登录直接进主界面
 - VPS 部署（https://pmlophy.com）→ 正常登录流程
 
-## 当前状态（2026-08-04，v114）
+## 当前状态（2026-08-04，v115）
 
 | 版本 | 摘要 |
 |------|------|
+| v115 | 项目结构整理：所有前后端代码归入 app/，根目录保留文档、规范与历史快照 |
 | v114 | 修滑块不可见：composer 让出 14px 滚动条列 + 深灰 thumb |
 | v113 | ChatGPT 式滚动条：灰轨常驻 + 15px 圆角滑块，去除暗色透明条冲突 |
 | v112 | 移除聊天区绿色自定义滚动条，仅保留原生滚动条 |
@@ -201,4 +207,4 @@ versions/                             # 版本快照（每次修改复制改动�
 - ✅ ChatGPT 风格浅色极简单列 UI；桌面/375px 自适应；页面无 Canvas 粒子与装饰动画
 - ⬜ 图片识别端到端验证（需 VPS vision 联调）
 
-**交付物**：根目录 `jarvis-voice.zip` 对应当前 `dist`；**每次对外汇报前**同轮 `npm run build` + 更新 zip，并在汇报中写明 **zip mtime**（见 §2.1）。
+**交付物**：根目录 `jarvis-voice.zip` 对应当前 `app/dist`；**每次对外汇报前**同轮 `cd app && npm run build` + 更新 zip，并在汇报中写明 **zip mtime**（见 §2.1）。

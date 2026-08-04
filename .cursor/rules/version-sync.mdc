@@ -5,7 +5,7 @@ alwaysApply: true
 
 # 版本号同步（强制收尾）
 
-在本仓库**任何一轮**修改 `src/`、`public/`、`index.html`、样式或构建相关文件后，**同一轮对话内**必须完成版本收尾，不得只改代码不记版本。
+在本仓库**任何一轮**修改 `app/src/`、`app/public/`、`app/index.html`、样式或构建相关文件后，**同一轮对话内**必须完成版本收尾，不得只改代码不记版本。
 
 ## 1. 确定新版本号 n
 
@@ -14,7 +14,7 @@ alwaysApply: true
 
 ## 2. 物理快照
 
-- 创建 `versions/v{n}/`，按源码路径复制**本轮改动的文件**（保留相对路径，如 `versions/v{n}/src/App.tsx`）。
+- 创建 `versions/v{n}/`，按源码路径复制**本轮改动的文件**（保留相对路径，如 `versions/v{n}/app/src/App.tsx`）。
 - 新增 `versions/v{n}/README.md`：一行标题 + 改动文件清单 + 简要说明（3～5 行即可）。
 - **禁止**删除旧 `versions/v*` 目录。
 
@@ -31,8 +31,8 @@ alwaysApply: true
 
 - **当前版本号 v{n}**
 - **改动文件清单**
-- **build**：`npm run build` 结果（同轮）
-- **jarvis-voice.zip**：同轮 `npm run build` 后必须更新；汇报中写明 **`ls -la jarvis-voice.zip` 的修改时间（mtime）**、大小、主 bundle 文件名（见 AGENTS.md §2.1）
+- **build**：`cd app && npm run build` 结果（同轮）
+- **jarvis-voice.zip**：同轮 `cd app && npm run build` 后必须更新；汇报中写明 **`ls -la jarvis-voice.zip` 的修改时间（mtime）**、大小、主 bundle 文件名（见 AGENTS.md §2.1）
 
 ## 5. 与红线一致
 

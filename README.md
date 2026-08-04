@@ -5,6 +5,7 @@
 ## 本地运行
 
 ```bash
+cd app
 npm install
 cp .env.example .env.local
 npm run dev
@@ -24,6 +25,8 @@ VITE_HERMES_API_KEY=YOUR_HERMES_API_KEY
 Hermes API Server 需要允许来自本地开发地址的 CORS 请求，并提供 OpenAI 兼容的 `/v1/models` 与 `/v1/chat/completions` 接口。修改环境变量后需要重启开发服务器。
 
 ## 可用命令
+
+以下命令均在 `app/` 目录执行：
 
 - `npm run dev`：启动开发服务器
 - `npm run build`：类型检查并构建生产包
