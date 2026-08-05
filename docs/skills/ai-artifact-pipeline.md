@@ -14,6 +14,28 @@ metadata:
 
 用户让 Cursor/Codex 改代码后，不想再手动"复制报告发给杰西卡 / 发 zip 部署"——让 AI 产物自动流转，用户只做最终拍板。
 
+## 审查门禁（方案 A，2026-08-05 用户要求加）
+
+**原则：部署不能全自动，必须有"审报告 → 用户确认 → 才部署"的人工节点。**
+
+- cron 只跑 `--check`（检测 incoming 新 zip → 标记 pending + 通知），**不自动部署**
+- 部署 = 用户确认后手动跑：`bash /root/deploy-all.sh --deploy [项目名]`
+- **只对项目部署包（zip）生效**——文档修改（context/PRD/AGENTS.md）走 git，不进 incoming，永不触发部署
+
+**完整流程**：
+```
+AI 改完 → rsync 上传 zip 到 incoming
+→ cron --check 检测到 → pending + 通知用户"有包待部署"
+→ 用户喊审 → 杰西卡读自检报告 + 审核 → digest
+→ 用户说"部署" → 手动跑 bash /root/deploy-all.sh --deploy <项目>
+→ 部署 + 验证 200 → 上线 → 用户实测
+```
+
+**deploy-all.sh 用法**：
+- `bash /root/deploy-all.sh --check`（cron 用，只检测不部署）
+- `bash /root/deploy-all.sh --deploy`（部署全部 pending 包）
+- `bash /root/deploy-all.sh --deploy forge-erp`（只部署指定项目）
+
 ## 核心架构（两条管道，弱耦合，不用 A2A）
 
 ```
