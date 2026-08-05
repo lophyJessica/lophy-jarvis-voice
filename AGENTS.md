@@ -99,10 +99,14 @@ versions/                             # 版本快照（每次修改复制改动�
 - `isDev` 判断（localhost/127.0.0.1）→ 免登录直接进主界面
 - VPS 部署（https://pmlophy.com）→ 正常登录流程
 
-## 当前状态（2026-08-05，v129）
+## 当前状态（2026-08-05，v133）
 
 | 版本 | 摘要 |
 |------|------|
+| v133 | 角标改左下角+安全区；语音默认手动（可切自动）；`APP_VERSION=v133` |
+| v132 | 右下角版本角标 `APP_VERSION`（确认热更新是否生效）；登录/主界面均显示 |
+| v131 | 体验：音量节流减打字卡；TTS 预取加深减句间停；APK /asr 0.9s+字节触发跟嘴 |
+| v130 | APK 热更新：`server.url=https://pmlophy.com/jarvis-voice/`，部署即生效 |
 | v129 | APK TTS：`getApiBase()/tts` + 失败重试；API base 双检 + allowNavigation |
 | v128 | APK 近似跟嘴：录音中周期整段 /asr（1.2–1.8s）+ 收尾打字机 |
 | v127 | APK 专用打字机：固定 45ms/字 interval，不再复用流式摊时长 hook |
