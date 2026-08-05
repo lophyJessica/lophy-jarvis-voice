@@ -1396,13 +1396,12 @@
   min-height: 100dvh;
 }
 
-/* 版本角标：左下角 + 安全区，避免曲面屏/圆角裁切 */
+/* 版本角标：确认热更新是否拉到新包（网页 / APK WebView 通用） */
 .app-version-badge {
   position: fixed;
   z-index: 50;
-  left: calc(12px + env(safe-area-inset-left, 0px));
-  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
-  right: auto;
+  right: 10px;
+  bottom: 8px;
   margin: 0;
   padding: 0;
   border: 0;

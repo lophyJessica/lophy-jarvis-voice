@@ -45,7 +45,6 @@ import type { JarvisStatus } from './components/JarvisCore'
 import LoginPage from './components/LoginPage'
 import ComposerStack from './components/ComposerStack'
 import MessageListView from './components/MessageListView'
-import VersionBadge from './components/VersionBadge'
 import { useSpeechSynthesis } from './hooks/useSpeechSynthesis'
 import { useStreamingAsr, type StreamingAsrDebugStats } from './hooks/useStreamingAsr'
 import { useTypewriterFollowAlong } from './hooks/useTypewriterFollowAlong'
@@ -129,7 +128,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   const [connectionState, setConnectionState] = useState<ConnectionState>('checking')
   const [historySyncState, setHistorySyncState] = useState<HistorySyncState>('syncing')
   const [copiedKey, setCopiedKey] = useState('')
-  const [autoMode, setAutoMode] = useState(false)
+  const [autoMode, setAutoMode] = useState(true)
   const [vadThreshold, setVadThreshold] = useState(0.032)
   const [mode, setMode] = useState<InputMode>(() => readStoredMode())
   const [ttsAutoPlay, setTtsAutoPlay] = useState(() => readTtsAutoPlay())
@@ -1141,7 +1140,6 @@ function AppRoot() {
     <div className={showWeChatNotice ? 'app-root with-wechat-notice' : 'app-root'}>
       {showWeChatNotice && <WeChatBrowserNotice onDismiss={() => setWeChatNoticeDismissed(true)} />}
       <AppShell />
-      <VersionBadge />
     </div>
   )
 }

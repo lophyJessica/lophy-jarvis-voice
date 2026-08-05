@@ -129,7 +129,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   const [connectionState, setConnectionState] = useState<ConnectionState>('checking')
   const [historySyncState, setHistorySyncState] = useState<HistorySyncState>('syncing')
   const [copiedKey, setCopiedKey] = useState('')
-  const [autoMode, setAutoMode] = useState(false)
+  const [autoMode, setAutoMode] = useState(true)
   const [vadThreshold, setVadThreshold] = useState(0.032)
   const [mode, setMode] = useState<InputMode>(() => readStoredMode())
   const [ttsAutoPlay, setTtsAutoPlay] = useState(() => readTtsAutoPlay())
