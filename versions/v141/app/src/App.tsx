@@ -245,82 +245,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     }
     setStreamingTranscript(trimmed)
   }, [clearApkAsrReveal])
-  const realtimeThinkingAudioRef = useRef<HTMLAudioElement | null>(null)
-  const realtimeThinkingPromptPlayingRef = useRef(false)
-  const realtimeThinkingPromptSourceRef = useRef<AudioBufferSourceNode | null>(null)
-  const realtimeThinkingAudioContextRef = useRef<AudioContext | null>(null)
-  const realtimeThinkingPromptBufferRef = useRef<AudioBuffer | null>(null)
-  const realtimeThinkingPromptLoadRef = useRef<Promise<AudioBuffer | null> | null>(null)
-  const realtimeThinkingPromptRequestRef = useRef(0)
-  const realtimeThinkingAudioUnlockedRef = useRef(false)
-  const cancelRealtimeThinkingPrompt = useCallback(() => {
-    realtimeThinkingPromptRequestRef.current += 1
-    const source = realtimeThinkingPromptSourceRef.current
-    realtimeThinkingPromptSourceRef.current = null
-    if (source) {
-      try { source.stop() } catch { /* already stopped */ }
-      try { source.disconnect() } catch { /* already disconnected */ }
-    }
-    const audio = realtimeThinkingAudioRef.current
-    realtimeThinkingAudioRef.current = null
-    if (audio) {
-      audio.pause()
-      audio.currentTime = 0
-    }
-    realtimeThinkingPromptPlayingRef.current = false
-  }, [])
-  const preloadRealtimeThinkingPrompt = useCallback((context: AudioContext) => {
-    if (realtimeThinkingPromptBufferRef.current) return Promise.resolve(realtimeThinkingPromptBufferRef.current)
-    if (realtimeThinkingPromptLoadRef.current) return realtimeThinkingPromptLoadRef.current
-    const load = fetch('/robin-thinking.mp3')
-      .then((response) => {
-        if (!response.ok) throw new Error(`本地提示音加载失败（${response.status}）`)
-        return response.arrayBuffer()
-      })
-      .then((data) => context.decodeAudioData(data))
-      .then((buffer) => {
-        if (realtimeThinkingAudioContextRef.current === context) realtimeThinkingPromptBufferRef.current = buffer
-        return buffer
-      })
-      .catch((error: unknown) => {
-        console.warn('Robin local thinking prompt preload failed', error)
-        return null
-      })
-    realtimeThinkingPromptLoadRef.current = load
-    return load
-  }, [])
-  const unlockRealtimeThinkingAudio = useCallback(() => {
-    if (typeof window === 'undefined') return
-    const AudioContextConstructor = window.AudioContext
-      ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-    if (!AudioContextConstructor) return
-    try {
-      let context = realtimeThinkingAudioContextRef.current
-      if (!context || context.state === 'closed') {
-        context = new AudioContextConstructor()
-        realtimeThinkingAudioContextRef.current = context
-        realtimeThinkingPromptBufferRef.current = null
-        realtimeThinkingPromptLoadRef.current = null
-        realtimeThinkingAudioUnlockedRef.current = false
-      }
-      if (context.state !== 'running') {
-        void context.resume().catch((error: unknown) => {
-          console.warn('Robin thinking AudioContext resume failed', error)
-        })
-      }
-      if (!realtimeThinkingAudioUnlockedRef.current) {
-        const silentBuffer = context.createBuffer(1, 1, context.sampleRate)
-        const silentSource = context.createBufferSource()
-        silentSource.buffer = silentBuffer
-        silentSource.connect(context.destination)
-        silentSource.start(0)
-        realtimeThinkingAudioUnlockedRef.current = true
-      }
-      void preloadRealtimeThinkingPrompt(context)
-    } catch (error) {
-      console.warn('Robin thinking AudioContext unlock failed', error)
-    }
-  }, [preloadRealtimeThinkingPrompt])
   const {
     speak,
     warmUpSpeech,
@@ -339,85 +263,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     stop: stopRealtime,
     stopPlayback: stopRealtimePlayback,
     transcript: realtimeTranscript,
-  } = useRealtimeVoice({
-    thinkingPromptAudioRef: realtimeThinkingAudioRef,
-    thinkingPromptPlayingRef: realtimeThinkingPromptPlayingRef,
-  })
-  const realtimeThinkingPromptedRef = useRef(false)
-  const closeRealtimeThinkingAudio = useCallback(() => {
-    cancelRealtimeThinkingPrompt()
-    const context = realtimeThinkingAudioContextRef.current
-    realtimeThinkingAudioContextRef.current = null
-    realtimeThinkingPromptBufferRef.current = null
-    realtimeThinkingPromptLoadRef.current = null
-    realtimeThinkingAudioUnlockedRef.current = false
-    if (context && context.state !== 'closed') void context.close().catch(() => undefined)
-  }, [cancelRealtimeThinkingPrompt])
-  const playRealtimeThinkingFallback = useCallback((requestId: number) => {
-    if (requestId !== realtimeThinkingPromptRequestRef.current || typeof Audio === 'undefined') {
-      realtimeThinkingPromptPlayingRef.current = false
-      return
-    }
-    const audio = new Audio('/robin-thinking.mp3')
-    audio.preload = 'auto'
-    audio.volume = 0.82
-    realtimeThinkingAudioRef.current = audio
-    const clearAudioRef = () => {
-      if (realtimeThinkingAudioRef.current !== audio) return
-      realtimeThinkingAudioRef.current = null
-      realtimeThinkingPromptPlayingRef.current = false
-    }
-    audio.onended = clearAudioRef
-    audio.onerror = () => {
-      console.warn('Robin local thinking prompt fallback failed')
-      clearAudioRef()
-    }
-    try {
-      void audio.play().catch((error: unknown) => {
-        console.warn('Robin local thinking prompt fallback play failed', error)
-        clearAudioRef()
-      })
-    } catch (error) {
-      console.warn('Robin local thinking prompt fallback play failed', error)
-      clearAudioRef()
-    }
-  }, [])
-  const playRealtimeThinkingPrompt = useCallback(() => {
-    cancelRealtimeThinkingPrompt()
-    const requestId = realtimeThinkingPromptRequestRef.current
-    realtimeThinkingPromptPlayingRef.current = true
-    const context = realtimeThinkingAudioContextRef.current
-    if (!context) {
-      playRealtimeThinkingFallback(requestId)
-      return
-    }
-    void (async () => {
-      try {
-        if (context.state !== 'running') await context.resume()
-        const buffer = realtimeThinkingPromptBufferRef.current ?? await preloadRealtimeThinkingPrompt(context)
-        if (requestId !== realtimeThinkingPromptRequestRef.current) return
-        if (!buffer || context.state === 'closed') {
-          playRealtimeThinkingFallback(requestId)
-          return
-        }
-        const source = context.createBufferSource()
-        source.buffer = buffer
-        source.connect(context.destination)
-        realtimeThinkingPromptSourceRef.current = source
-        source.onended = () => {
-          if (realtimeThinkingPromptSourceRef.current !== source) return
-          realtimeThinkingPromptSourceRef.current = null
-          realtimeThinkingPromptPlayingRef.current = false
-          source.disconnect()
-        }
-        source.start(0)
-      } catch (error) {
-        if (requestId !== realtimeThinkingPromptRequestRef.current) return
-        console.warn('Robin local thinking prompt AudioContext playback failed', error)
-        playRealtimeThinkingFallback(requestId)
-      }
-    })()
-  }, [cancelRealtimeThinkingPrompt, playRealtimeThinkingFallback, preloadRealtimeThinkingPrompt])
+  } = useRealtimeVoice()
   const previousRealtimePhaseRef = useRef(realtimePhase)
   const {
     beginLivePreview: beginStreamingLivePreview,
@@ -690,6 +536,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     error: vadError,
     finishRecording,
     isListening: vadListening,
+    isSupported: vadSupported,
     setMockVolume,
     start: startVad,
     stop: stopVad,
@@ -725,11 +572,28 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     }
   }, [beginManualRecording, finishRecording, messageApi, stopSpeaking])
 
+  const enterVoiceMode = useCallback(() => {
+    if (!vadSupported) {
+      void messageApi.warning('当前浏览器不支持麦克风录音')
+      return
+    }
+    stopRealtime()
+    modeRef.current = 'voice'
+    setMode('voice')
+    // 仅切模式时不打断正在进行的播报/思考
+    if (statusRef.current !== 'speaking' && statusRef.current !== 'thinking') {
+      transitionTo('idle')
+    }
+    startVad().catch((error: unknown) => {
+      const fallback = error instanceof Error ? error.message : '麦克风监听启动失败'
+      void messageApi.warning(fallback)
+    })
+  }, [messageApi, startVad, stopRealtime, transitionTo, vadSupported])
+
   const exitVoiceMode = useCallback(() => {
     activeRequestRef.current?.abort()
     activeRequestRef.current = null
     cancelSpeech()
-    cancelRealtimeThinkingPrompt()
     stopRealtime()
     modeRef.current = 'text'
     setMode('text')
@@ -741,13 +605,12 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     setStreamingTranscript('')
     setStreamingText('')
     transitionTo('idle')
-  }, [cancelRealtimeThinkingPrompt, cancelSpeech, cleanupStreamingAsr, clearApkAsrReveal, stopRealtime, stopVad, transitionTo])
+  }, [cancelSpeech, cleanupStreamingAsr, clearApkAsrReveal, stopRealtime, stopVad, transitionTo])
 
   const enterRealtimeMode = useCallback(() => {
     activeRequestRef.current?.abort()
     activeRequestRef.current = null
     cancelSpeech()
-    cancelRealtimeThinkingPrompt()
     stopVad()
     cleanupStreamingAsr()
     clearApkAsrReveal()
@@ -757,14 +620,13 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     modeRef.current = 'realtime'
     setMode('realtime')
     transitionTo('idle')
-    unlockRealtimeThinkingAudio()
     startRealtime().catch((error: unknown) => {
       void messageApi.error(error instanceof Error ? error.message : '实时语音启动失败')
+      enterVoiceMode()
     })
-  }, [cancelRealtimeThinkingPrompt, cancelSpeech, cleanupStreamingAsr, clearApkAsrReveal, messageApi, startRealtime, stopVad, transitionTo, unlockRealtimeThinkingAudio])
+  }, [cancelSpeech, cleanupStreamingAsr, clearApkAsrReveal, enterVoiceMode, messageApi, startRealtime, stopVad, transitionTo])
 
   const exitRealtimeMode = useCallback(() => {
-    cancelRealtimeThinkingPrompt()
     stopRealtime()
     stopVad()
     cleanupStreamingAsr()
@@ -774,19 +636,13 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     localStorage.setItem(modeStorageKey, 'text')
     transitionTo('idle')
     window.setTimeout(() => void refreshHistory(), 350)
-  }, [cancelRealtimeThinkingPrompt, cleanupStreamingAsr, clearApkAsrReveal, refreshHistory, stopRealtime, stopVad, transitionTo])
+  }, [cleanupStreamingAsr, clearApkAsrReveal, refreshHistory, stopRealtime, stopVad, transitionTo])
 
-  // 每轮识别文本到达后只播一次本地提示音；正式 PCM 回复一到立即取消，避免与豆包声音叠加。
   useEffect(() => {
-    if (mode !== 'realtime' || realtimePhase !== 'thinking') {
-      realtimeThinkingPromptedRef.current = false
-      cancelRealtimeThinkingPrompt()
-      return
-    }
-    if (!realtimeTranscript || realtimeThinkingPromptedRef.current) return
-    realtimeThinkingPromptedRef.current = true
-    playRealtimeThinkingPrompt()
-  }, [cancelRealtimeThinkingPrompt, mode, playRealtimeThinkingPrompt, realtimePhase, realtimeTranscript])
+    if (mode !== 'realtime' || realtimePhase !== 'error') return
+    void messageApi.warning('实时连接失败，已切换到经典语音模式')
+    enterVoiceMode()
+  }, [enterVoiceMode, messageApi, mode, realtimePhase])
 
   useEffect(() => {
     const previousPhase = previousRealtimePhaseRef.current
@@ -930,17 +786,15 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   useEffect(() => () => {
     activeRequestRef.current?.abort()
     cancelSpeech()
-    closeRealtimeThinkingAudio()
     stopVad()
     cleanupStreamingAsr()
     stopRealtime()
     window.clearTimeout(copyResetTimerRef.current)
     window.clearInterval(apkAsrRevealTimerRef.current)
-  }, [cancelSpeech, cleanupStreamingAsr, closeRealtimeThinkingAudio, stopRealtime, stopVad])
+  }, [cancelSpeech, cleanupStreamingAsr, stopRealtime, stopVad])
 
   const clearConversation = useCallback(async () => {
     cancelSpeech()
-    cancelRealtimeThinkingPrompt()
     if (statusRef.current === 'speaking') transitionTo('idle')
     shouldAutoScrollRef.current = true
     messagesRef.current = []
@@ -964,7 +818,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
       console.error('Robin history clear failed', historyError)
       setHistorySyncState('fallback')
     }
-  }, [cancelRealtimeThinkingPrompt, cancelSpeech, clearApkAsrReveal, transitionTo])
+  }, [cancelSpeech, clearApkAsrReveal, transitionTo])
 
   const confirmClearConversation = useCallback(() => {
     modal.confirm({
@@ -1052,9 +906,8 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     idle: '实时模式待机',
     connecting: '实时连接中…',
     connected: '实时对话中',
-    thinking: '正在思考…',
     speaking: '罗宾实时回应中',
-    error: '连接断开',
+    error: '实时连接异常',
   }[realtimePhase]
   const visibleStatusText = isRealtimeMode
     ? realtimeStatusText

@@ -71,23 +71,6 @@ versions/                             # 版本快照（每次修改复制改动�
 - **汇报中必须写明 zip 的 mtime**（与 build 同轮），例如执行 `ls -la jarvis-voice.zip` 或 `date` 后的时间；可附带大小 / 主 bundle 文件名（如 `index-*.js`）
 - **禁止**在较早轮次打过 zip 后，仅改代码或仅文字汇报而不重新 build + zip；用户看到的「完成时间」应与 zip 修改时间一致
 
-### 2.2 产物自动流转管道（完成后必做，与 §2.1 配套）
-
-每轮 build + zip 完成后，**必须**执行以下两个动作（用户已配好管道，无需用户手动发 zip）：
-
-1. **上传 zip 到 VPS（自动部署）**：
-   ```bash
-   rsync -avz -e "ssh -p 2222 -i ~/.ssh/id_ed25519_vps" "/Users/liulongfei/个人文件/lophy-jarvis-voice/jarvis-voice.zip" root@192.220.14.245:/var/www/pmlophy.com/jarvis-voice-incoming/
-   ```
-   VPS 每分钟 cron 自动部署到 jarvis-voice/ → 热更新生效。上传成功后在汇报里注明「已上传 VPS」。
-
-2. **提交自检报告（审核管道）**：
-   - 生成 `{项目}-{任务}-{时间}.md`，模板：# AI 自检报告 / 项目任务 / 改动文件清单 / 每个改动点说明 / 自检结果（build 是否通过）/ 遗留风险
-   - 上传：`curl -X POST "https://pmlophy.com/p/jarvis/file/upload" -H "X-Jarvis-User: ai-reports" -F "file=@报告.md"`
-   - 汇报里附报告文件名
-
-**注意**：zip 在项目**根目录**（不是 app/）；中文路径加引号。红线不变：不 commit / 不 push。
-
 ### 3. 红线禁止
 - 不 commit、不 push、不部署（部署由用户确认后执行）
 - 只改本项目，禁止碰 lophy-jarvis（文字版）
@@ -116,11 +99,10 @@ versions/                             # 版本快照（每次修改复制改动�
 - `isDev` 判断（localhost/127.0.0.1）→ 免登录直接进主界面
 - VPS 部署（https://pmlophy.com）→ 正常登录流程
 
-## 当前状态（2026-08-05，v147）
+## 当前状态（2026-08-05，v146）
 
 | 版本 | 摘要 |
 |------|------|
-| v147 | robin-thinking.mp3 播放期间在 useRealtimeVoice PCM 入口丢弃所有帧，提示音结束后恢复正式 PCM 播放 |
 | v146 | 实时 thinking 兜底提示改为 `app/public/robin-thinking.mp3` 原生 Audio 播放；正式 PCM 到达时暂停并复位提示音 |
 | v145 | 实时 WS 明确处理 `type=thinking` 文本事件，写入识别文本并触发本地完整版思考提示音；音频帧进入 speaking 后取消提示 |
 | v144 | 实时语音识别进入 thinking 时播放浏览器本地中文提示音；正式 PCM 到达或退出时立即取消，避免与豆包 TTS 叠音 |

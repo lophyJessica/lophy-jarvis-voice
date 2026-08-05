@@ -245,82 +245,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     }
     setStreamingTranscript(trimmed)
   }, [clearApkAsrReveal])
-  const realtimeThinkingAudioRef = useRef<HTMLAudioElement | null>(null)
-  const realtimeThinkingPromptPlayingRef = useRef(false)
-  const realtimeThinkingPromptSourceRef = useRef<AudioBufferSourceNode | null>(null)
-  const realtimeThinkingAudioContextRef = useRef<AudioContext | null>(null)
-  const realtimeThinkingPromptBufferRef = useRef<AudioBuffer | null>(null)
-  const realtimeThinkingPromptLoadRef = useRef<Promise<AudioBuffer | null> | null>(null)
-  const realtimeThinkingPromptRequestRef = useRef(0)
-  const realtimeThinkingAudioUnlockedRef = useRef(false)
-  const cancelRealtimeThinkingPrompt = useCallback(() => {
-    realtimeThinkingPromptRequestRef.current += 1
-    const source = realtimeThinkingPromptSourceRef.current
-    realtimeThinkingPromptSourceRef.current = null
-    if (source) {
-      try { source.stop() } catch { /* already stopped */ }
-      try { source.disconnect() } catch { /* already disconnected */ }
-    }
-    const audio = realtimeThinkingAudioRef.current
-    realtimeThinkingAudioRef.current = null
-    if (audio) {
-      audio.pause()
-      audio.currentTime = 0
-    }
-    realtimeThinkingPromptPlayingRef.current = false
-  }, [])
-  const preloadRealtimeThinkingPrompt = useCallback((context: AudioContext) => {
-    if (realtimeThinkingPromptBufferRef.current) return Promise.resolve(realtimeThinkingPromptBufferRef.current)
-    if (realtimeThinkingPromptLoadRef.current) return realtimeThinkingPromptLoadRef.current
-    const load = fetch('/robin-thinking.mp3')
-      .then((response) => {
-        if (!response.ok) throw new Error(`本地提示音加载失败（${response.status}）`)
-        return response.arrayBuffer()
-      })
-      .then((data) => context.decodeAudioData(data))
-      .then((buffer) => {
-        if (realtimeThinkingAudioContextRef.current === context) realtimeThinkingPromptBufferRef.current = buffer
-        return buffer
-      })
-      .catch((error: unknown) => {
-        console.warn('Robin local thinking prompt preload failed', error)
-        return null
-      })
-    realtimeThinkingPromptLoadRef.current = load
-    return load
-  }, [])
-  const unlockRealtimeThinkingAudio = useCallback(() => {
-    if (typeof window === 'undefined') return
-    const AudioContextConstructor = window.AudioContext
-      ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-    if (!AudioContextConstructor) return
-    try {
-      let context = realtimeThinkingAudioContextRef.current
-      if (!context || context.state === 'closed') {
-        context = new AudioContextConstructor()
-        realtimeThinkingAudioContextRef.current = context
-        realtimeThinkingPromptBufferRef.current = null
-        realtimeThinkingPromptLoadRef.current = null
-        realtimeThinkingAudioUnlockedRef.current = false
-      }
-      if (context.state !== 'running') {
-        void context.resume().catch((error: unknown) => {
-          console.warn('Robin thinking AudioContext resume failed', error)
-        })
-      }
-      if (!realtimeThinkingAudioUnlockedRef.current) {
-        const silentBuffer = context.createBuffer(1, 1, context.sampleRate)
-        const silentSource = context.createBufferSource()
-        silentSource.buffer = silentBuffer
-        silentSource.connect(context.destination)
-        silentSource.start(0)
-        realtimeThinkingAudioUnlockedRef.current = true
-      }
-      void preloadRealtimeThinkingPrompt(context)
-    } catch (error) {
-      console.warn('Robin thinking AudioContext unlock failed', error)
-    }
-  }, [preloadRealtimeThinkingPrompt])
   const {
     speak,
     warmUpSpeech,
@@ -339,85 +263,34 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     stop: stopRealtime,
     stopPlayback: stopRealtimePlayback,
     transcript: realtimeTranscript,
-  } = useRealtimeVoice({
-    thinkingPromptAudioRef: realtimeThinkingAudioRef,
-    thinkingPromptPlayingRef: realtimeThinkingPromptPlayingRef,
-  })
+  } = useRealtimeVoice()
+  const realtimeThinkingAudioRef = useRef<HTMLAudioElement | null>(null)
   const realtimeThinkingPromptedRef = useRef(false)
-  const closeRealtimeThinkingAudio = useCallback(() => {
+  const cancelRealtimeThinkingPrompt = useCallback(() => {
+    const audio = realtimeThinkingAudioRef.current
+    if (!audio) return
+    audio.pause()
+    audio.currentTime = 0
+    realtimeThinkingAudioRef.current = null
+  }, [])
+  const playRealtimeThinkingPrompt = useCallback(() => {
+    if (typeof window === 'undefined' || typeof Audio === 'undefined') return
     cancelRealtimeThinkingPrompt()
-    const context = realtimeThinkingAudioContextRef.current
-    realtimeThinkingAudioContextRef.current = null
-    realtimeThinkingPromptBufferRef.current = null
-    realtimeThinkingPromptLoadRef.current = null
-    realtimeThinkingAudioUnlockedRef.current = false
-    if (context && context.state !== 'closed') void context.close().catch(() => undefined)
-  }, [cancelRealtimeThinkingPrompt])
-  const playRealtimeThinkingFallback = useCallback((requestId: number) => {
-    if (requestId !== realtimeThinkingPromptRequestRef.current || typeof Audio === 'undefined') {
-      realtimeThinkingPromptPlayingRef.current = false
-      return
-    }
     const audio = new Audio('/robin-thinking.mp3')
     audio.preload = 'auto'
     audio.volume = 0.82
     realtimeThinkingAudioRef.current = audio
     const clearAudioRef = () => {
-      if (realtimeThinkingAudioRef.current !== audio) return
-      realtimeThinkingAudioRef.current = null
-      realtimeThinkingPromptPlayingRef.current = false
+      if (realtimeThinkingAudioRef.current === audio) realtimeThinkingAudioRef.current = null
     }
     audio.onended = clearAudioRef
-    audio.onerror = () => {
-      console.warn('Robin local thinking prompt fallback failed')
-      clearAudioRef()
-    }
+    audio.onerror = clearAudioRef
     try {
-      void audio.play().catch((error: unknown) => {
-        console.warn('Robin local thinking prompt fallback play failed', error)
-        clearAudioRef()
-      })
-    } catch (error) {
-      console.warn('Robin local thinking prompt fallback play failed', error)
+      void audio.play().catch(clearAudioRef)
+    } catch {
       clearAudioRef()
     }
-  }, [])
-  const playRealtimeThinkingPrompt = useCallback(() => {
-    cancelRealtimeThinkingPrompt()
-    const requestId = realtimeThinkingPromptRequestRef.current
-    realtimeThinkingPromptPlayingRef.current = true
-    const context = realtimeThinkingAudioContextRef.current
-    if (!context) {
-      playRealtimeThinkingFallback(requestId)
-      return
-    }
-    void (async () => {
-      try {
-        if (context.state !== 'running') await context.resume()
-        const buffer = realtimeThinkingPromptBufferRef.current ?? await preloadRealtimeThinkingPrompt(context)
-        if (requestId !== realtimeThinkingPromptRequestRef.current) return
-        if (!buffer || context.state === 'closed') {
-          playRealtimeThinkingFallback(requestId)
-          return
-        }
-        const source = context.createBufferSource()
-        source.buffer = buffer
-        source.connect(context.destination)
-        realtimeThinkingPromptSourceRef.current = source
-        source.onended = () => {
-          if (realtimeThinkingPromptSourceRef.current !== source) return
-          realtimeThinkingPromptSourceRef.current = null
-          realtimeThinkingPromptPlayingRef.current = false
-          source.disconnect()
-        }
-        source.start(0)
-      } catch (error) {
-        if (requestId !== realtimeThinkingPromptRequestRef.current) return
-        console.warn('Robin local thinking prompt AudioContext playback failed', error)
-        playRealtimeThinkingFallback(requestId)
-      }
-    })()
-  }, [cancelRealtimeThinkingPrompt, playRealtimeThinkingFallback, preloadRealtimeThinkingPrompt])
+  }, [cancelRealtimeThinkingPrompt])
   const previousRealtimePhaseRef = useRef(realtimePhase)
   const {
     beginLivePreview: beginStreamingLivePreview,
@@ -757,11 +630,10 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     modeRef.current = 'realtime'
     setMode('realtime')
     transitionTo('idle')
-    unlockRealtimeThinkingAudio()
     startRealtime().catch((error: unknown) => {
       void messageApi.error(error instanceof Error ? error.message : '实时语音启动失败')
     })
-  }, [cancelRealtimeThinkingPrompt, cancelSpeech, cleanupStreamingAsr, clearApkAsrReveal, messageApi, startRealtime, stopVad, transitionTo, unlockRealtimeThinkingAudio])
+  }, [cancelRealtimeThinkingPrompt, cancelSpeech, cleanupStreamingAsr, clearApkAsrReveal, messageApi, startRealtime, stopVad, transitionTo])
 
   const exitRealtimeMode = useCallback(() => {
     cancelRealtimeThinkingPrompt()
@@ -930,13 +802,13 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   useEffect(() => () => {
     activeRequestRef.current?.abort()
     cancelSpeech()
-    closeRealtimeThinkingAudio()
+    cancelRealtimeThinkingPrompt()
     stopVad()
     cleanupStreamingAsr()
     stopRealtime()
     window.clearTimeout(copyResetTimerRef.current)
     window.clearInterval(apkAsrRevealTimerRef.current)
-  }, [cancelSpeech, cleanupStreamingAsr, closeRealtimeThinkingAudio, stopRealtime, stopVad])
+  }, [cancelRealtimeThinkingPrompt, cancelSpeech, cleanupStreamingAsr, stopRealtime, stopVad])
 
   const clearConversation = useCallback(async () => {
     cancelSpeech()

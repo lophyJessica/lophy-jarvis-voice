@@ -29,7 +29,7 @@ interface ComposerStackProps {
   isTranscribing: boolean
   isRealtimeMode: boolean
   realtimeError: string | null
-  realtimePhase: 'idle' | 'connecting' | 'connected' | 'thinking' | 'speaking' | 'error'
+  realtimePhase: 'idle' | 'connecting' | 'connected' | 'speaking' | 'error'
   realtimeStatusText: string
   realtimeTranscript: string
   isVoiceMode: boolean
@@ -227,7 +227,7 @@ const ComposerStack = memo(forwardRef<ComposerStackHandle, ComposerStackProps>(f
           <div className={`realtime-composer-status realtime-phase-${realtimePhase}`} data-testid="realtime-composer-status" aria-live="polite">
             <span className="realtime-composer-status-dot" />
             <div className="realtime-composer-status-copy">
-              <strong>{realtimePhase === 'thinking' ? '正在思考…' : realtimePhase === 'error' ? '连接断开' : '实时对话中'}</strong>
+              <strong>实时对话中</strong>
               <span>{realtimeError || realtimeTranscript || (realtimePhase === 'connected' ? '请直接说话，开口即可打断' : realtimeStatusText)}</span>
             </div>
             {realtimePhase === 'speaking' && <Button danger size="small" onClick={onStopRealtimePlayback}>打断</Button>}
