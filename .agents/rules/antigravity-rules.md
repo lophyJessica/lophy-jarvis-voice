@@ -49,3 +49,22 @@ description: 减少 LLM 写代码常见问题的行为准则——先浮现假�
 ---
 
 **这套准则生效的标志：** diff 里没有多余改动、不再因过度复杂而返工、澄清性提问发生在动手之前而不是出错之后。
+
+---
+
+# 产物自动流转管道（lophy-jarvis-voice 必做）
+
+每轮 `npm run build` + 产出 `jarvis-voice.zip`（项目根目录）后，**必须**执行：
+
+1. **上传 zip 到 VPS（自动部署）**：
+   ```bash
+   rsync -avz -e "ssh -p 2222 -i ~/.ssh/id_ed25519_vps" "/Users/liulongfei/个人文件/lophy-jarvis-voice/jarvis-voice.zip" root@192.220.14.245:/var/www/pmlophy.com/jarvis-voice-incoming/
+   ```
+   VPS cron 每分钟自动部署 → 热更新生效。汇报里注明「已上传 VPS」。
+
+2. **提交自检报告**：
+   - 生成 `{项目}-{任务}-{时间}.md`，模板：# AI 自检报告 / 项目任务 / 改动文件清单 / 改动点说明 / 自检结果 / 遗留风险
+   - 上传：`curl -X POST "https://pmlophy.com/p/jarvis/file/upload" -H "X-Jarvis-User: ai-reports" -F "file=@报告.md"`
+   - 汇报里附报告文件名
+
+红线不变：不 commit / 不 push。zip 在项目根目录（非 app/）；中文路径加引号。
