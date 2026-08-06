@@ -116,11 +116,10 @@ versions/                             # 版本快照（每次修改复制改动�
 - `isDev` 判断（localhost/127.0.0.1）→ 免登录直接进主界面
 - VPS 部署（https://pmlophy.com）→ 正常登录流程
 
-## 当前状态（2026-08-06，v149）
+## 当前状态（2026-08-06，v148）
 
 | 版本 | 摘要 |
 |------|------|
-| v149 | 完成豆包参与第一轮对话，后续对话由自己有智能体进行回复 |
 | v148 | 实时 WS 处理 robin_text 句子并在聊天记录中即时追加显示；历史最终助手回复匹配后隐藏预览，退出实时模式清理临时文本 |
 | v147 | robin-thinking.mp3 播放期间在 useRealtimeVoice PCM 入口丢弃所有帧，提示音结束后恢复正式 PCM 播放 |
 | v146 | 实时 thinking 兜底提示改为 `app/public/robin-thinking.mp3` 原生 Audio 播放；正式 PCM 到达时暂停并复位提示音 |
