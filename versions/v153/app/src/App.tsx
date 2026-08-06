@@ -1126,7 +1126,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
               <Tag data-testid="history-sync-status" icon={<CloudSyncOutlined />} color={historySyncTag.color}>
                 {historySyncTag.text}
               </Tag>
-              <VersionBadge placement="header" />
             </div>
             <div className="conversation-action-buttons">
               <Tooltip title={headerSpeechStopping ? '停止播报' : '朗读上一条回复'}>
@@ -1397,6 +1396,7 @@ function AppRoot() {
     <div className={showWeChatNotice ? 'app-root with-wechat-notice' : 'app-root'}>
       {showWeChatNotice && <WeChatBrowserNotice onDismiss={() => setWeChatNoticeDismissed(true)} />}
       <AppShell />
+      <VersionBadge />
     </div>
   )
 }

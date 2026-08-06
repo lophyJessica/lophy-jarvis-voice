@@ -583,23 +583,18 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
       setAssistantStreamingText('')
       setConnectionState('online')
 
-      let didAutoSpeak = false
       if (shouldAutoSpeak) {
         const assistantSpeechText = getAssistantSpeechTextForTurn(assistantMessage, userMessage)
-        // 仅代码块、无正文时不播报
-        if (assistantSpeechText) {
-          didAutoSpeak = true
-          beginStreamingSpeech(() => {
-            transitionTo('speaking')
-            suppressVadRef.current(200)
-          })
-          appendAssistantSpeechText(assistantSpeechText)
-          endStreamingSpeech()
-        }
+        beginStreamingSpeech(() => {
+          transitionTo('speaking')
+          suppressVadRef.current(200)
+        })
+        appendAssistantSpeechText(assistantSpeechText)
+        endStreamingSpeech()
       }
       await persistTurn(nextMessages)
 
-      if (didAutoSpeak) {
+      if (shouldAutoSpeak) {
         await waitForSpeechDrain()
       }
       if (statusRef.current !== 'recording' && statusRef.current !== 'transcribing') {
@@ -1126,7 +1121,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
               <Tag data-testid="history-sync-status" icon={<CloudSyncOutlined />} color={historySyncTag.color}>
                 {historySyncTag.text}
               </Tag>
-              <VersionBadge placement="header" />
             </div>
             <div className="conversation-action-buttons">
               <Tooltip title={headerSpeechStopping ? '停止播报' : '朗读上一条回复'}>
@@ -1397,6 +1391,7 @@ function AppRoot() {
     <div className={showWeChatNotice ? 'app-root with-wechat-notice' : 'app-root'}>
       {showWeChatNotice && <WeChatBrowserNotice onDismiss={() => setWeChatNoticeDismissed(true)} />}
       <AppShell />
+      <VersionBadge />
     </div>
   )
 }

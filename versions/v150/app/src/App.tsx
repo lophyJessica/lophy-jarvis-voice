@@ -87,14 +87,6 @@ function getLatestAssistantMessageText(messages: StoredMessage[]) {
   return ''
 }
 
-function getAssistantSpeechTextForTurn(assistantMessage: StoredMessage, userMessage: StoredMessage) {
-  const assistantText = cleanSpeechText(getMessageText(assistantMessage.content))
-  const userText = cleanSpeechText(getMessageText(userMessage.content))
-  if (!assistantText || !userText) return assistantText
-  if (assistantText === userText) return ''
-  return assistantText.split(userText).join('').trim()
-}
-
 function isWeChatBrowser() {
   return /MicroMessenger/i.test(navigator.userAgent)
 }
@@ -138,7 +130,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   const [apkAsrRevealText, setApkAsrRevealText] = useState('')
   const [apkRevealActive, setApkRevealActive] = useState(false)
   const [streamingDebug, setStreamingDebug] = useState<StreamingAsrDebugStats | null>(null)
-  const [assistantStreamingText, setAssistantStreamingText] = useState('')
+  const [streamingText, setStreamingText] = useState('')
   const [status, setStatus] = useState<JarvisStatus>('idle')
   const liveAsrText = streamingTranscript || transcript
   const followAlongEnabled = status === 'recording' || status === 'transcribing'
@@ -339,6 +331,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   }, [preloadRealtimeThinkingPrompt])
   const {
     speak,
+    warmUpSpeech,
     beginStreamingSpeech,
     appendAssistantSpeechText,
     endStreamingSpeech,
@@ -494,7 +487,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     activeRequestRef.current?.abort()
     activeRequestRef.current = null
     cancelSpeech()
-    setAssistantStreamingText('')
+    setStreamingText('')
     transitionTo('idle')
   }, [cancelSpeech, transitionTo])
 
@@ -513,7 +506,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
   type SendTurnContext = {
     pendingMessages: StoredMessage[]
     requestController: AbortController
-    shouldAutoSpeak: boolean
+    shouldStreamTts: boolean
     userMessage: StoredMessage
   }
 
@@ -539,7 +532,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     cancelSpeech()
     setPendingImages([])
     setPendingDocuments([])
-    setAssistantStreamingText('')
+    setStreamingText('')
 
     const content = documents.length > 0
       ? buildComposerMessageContent(userInstruction, images, documents)
@@ -553,21 +546,28 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
 
     const requestController = new AbortController()
     activeRequestRef.current = requestController
-    const shouldAutoSpeak = synthesisSupported && (modeRef.current === 'voice' || ttsAutoPlayRef.current)
+    const shouldStreamTts = synthesisSupported && (modeRef.current === 'voice' || ttsAutoPlayRef.current)
+    if (shouldStreamTts) {
+      beginStreamingSpeech(() => {
+        transitionTo('speaking')
+        suppressVadRef.current(200)
+      })
+    }
 
-    return { pendingMessages, requestController, shouldAutoSpeak, userMessage }
-  }, [cancelSpeech, messageApi, transitionTo, synthesisSupported])
+    return { pendingMessages, requestController, shouldStreamTts, userMessage }
+  }, [beginStreamingSpeech, cancelSpeech, messageApi, transitionTo, synthesisSupported])
 
   const executeSendTurn = useCallback(async (ctx: SendTurnContext): Promise<boolean> => {
-    const { pendingMessages, requestController, shouldAutoSpeak, userMessage } = ctx
+    const { pendingMessages, requestController, shouldStreamTts, userMessage } = ctx
     let responseText = ''
 
     try {
       responseText = await streamChatCompletion(
         [{ role: userMessage.role, content: userMessage.content }],
-        (assistantDelta) => {
-          responseText += assistantDelta
-          setAssistantStreamingText(responseText)
+        (delta) => {
+          responseText += delta
+          setStreamingText(responseText)
+          if (shouldStreamTts) appendAssistantSpeechText(delta)
         },
         requestController.signal,
         systemPrompt,
@@ -580,26 +580,12 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
       messagesRef.current = nextMessages
       setMessages(nextMessages)
       setHistory(toChatHistory(nextMessages))
-      setAssistantStreamingText('')
+      setStreamingText('')
       setConnectionState('online')
-
-      let didAutoSpeak = false
-      if (shouldAutoSpeak) {
-        const assistantSpeechText = getAssistantSpeechTextForTurn(assistantMessage, userMessage)
-        // 仅代码块、无正文时不播报
-        if (assistantSpeechText) {
-          didAutoSpeak = true
-          beginStreamingSpeech(() => {
-            transitionTo('speaking')
-            suppressVadRef.current(200)
-          })
-          appendAssistantSpeechText(assistantSpeechText)
-          endStreamingSpeech()
-        }
-      }
       await persistTurn(nextMessages)
 
-      if (didAutoSpeak) {
+      if (shouldStreamTts) {
+        endStreamingSpeech()
         await waitForSpeechDrain()
       }
       if (statusRef.current !== 'recording' && statusRef.current !== 'transcribing') {
@@ -608,7 +594,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
       return true
     } catch (error) {
       if (requestController.signal.aborted) {
-        if (shouldAutoSpeak) cancelSpeech()
+        if (shouldStreamTts) cancelSpeech()
         return false
       }
       if (error instanceof HermesError && error.kind === 'unauthorized') {
@@ -616,19 +602,19 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
         return false
       }
       const fallback = error instanceof HermesError ? error.message : '罗宾暂时不可用，请稍后再试'
-      setAssistantStreamingText('')
+      setStreamingText('')
       if (error instanceof HermesError) setConnectionState('offline')
       const errorMessages = [...messagesRef.current, createStoredMessage('assistant', fallback)].slice(-maxSavedMessages)
       messagesRef.current = errorMessages
       setMessages(errorMessages)
       transitionTo('idle')
       void messageApi.error(fallback)
-      if (shouldAutoSpeak) cancelSpeech()
+      if (shouldStreamTts) cancelSpeech()
       return false
     } finally {
       if (activeRequestRef.current === requestController) activeRequestRef.current = null
     }
-  }, [appendAssistantSpeechText, beginStreamingSpeech, cancelSpeech, endStreamingSpeech, messageApi, persistTurn, transitionTo, waitForSpeechDrain])
+  }, [appendAssistantSpeechText, cancelSpeech, endStreamingSpeech, messageApi, persistTurn, transitionTo, waitForSpeechDrain])
 
   const sendMessage = useCallback(async (overrideText?: string, overrideImages?: string[], overrideDocuments?: PendingDocument[]): Promise<boolean> => {
     const images = overrideImages ?? pendingImages
@@ -666,7 +652,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     clearApkAsrReveal()
     setTranscript('')
     setStreamingTranscript('')
-    setAssistantStreamingText('')
+    setStreamingText('')
     beginStreamingLivePreview()
     transitionTo('recording')
   }, [beginStreamingLivePreview, clearApkAsrReveal, transitionTo])
@@ -762,7 +748,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     clearApkAsrReveal()
     setTranscript('')
     setStreamingTranscript('')
-    setAssistantStreamingText('')
+    setStreamingText('')
     transitionTo('idle')
   }, [cancelRealtimeThinkingPrompt, cancelSpeech, cleanupStreamingAsr, clearApkAsrReveal, stopRealtime, stopVad, transitionTo])
 
@@ -776,7 +762,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     clearApkAsrReveal()
     setTranscript('')
     setStreamingTranscript('')
-    setAssistantStreamingText('')
+    setStreamingText('')
     modeRef.current = 'realtime'
     setMode('realtime')
     transitionTo('idle')
@@ -944,7 +930,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     const messageList = messageListRef.current
     if (!messageList || !shouldAutoScrollRef.current) return
     messageList.scrollTop = messageList.scrollHeight
-  }, [assistantStreamingText, messages])
+  }, [messages, streamingText])
 
   useEffect(() => {
     if (status === 'speaking' && !isSpeaking) transitionTo('idle')
@@ -972,7 +958,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     clearApkAsrReveal()
     setTranscript('')
     setStreamingTranscript('')
-    setAssistantStreamingText('')
+    setStreamingText('')
     setExpandedMessageIds(new Set())
     try {
       await clearLocalMessages()
@@ -1025,6 +1011,13 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
     && replayableSpeechText.length > 0
     && status !== 'thinking'
     && status !== 'transcribing'
+
+  // 有可朗读回复时后台预热首段 TTS，点击后力争 1s 内出声
+  useEffect(() => {
+    if (!synthesisSupported || !replayableSpeechText) return
+    if (status === 'speaking' || status === 'thinking' || isSpeaking) return
+    void warmUpSpeech(replayableSpeechText)
+  }, [isSpeaking, replayableSpeechText, status, synthesisSupported, warmUpSpeech])
 
   const replayAssistantSpeech = useCallback(async () => {
     if (!replayableSpeechText || !synthesisSupported) {
@@ -1126,7 +1119,6 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
               <Tag data-testid="history-sync-status" icon={<CloudSyncOutlined />} color={historySyncTag.color}>
                 {historySyncTag.text}
               </Tag>
-              <VersionBadge placement="header" />
             </div>
             <div className="conversation-action-buttons">
               <Tooltip title={headerSpeechStopping ? '停止播报' : '朗读上一条回复'}>
@@ -1158,7 +1150,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
                   shape="circle"
                   icon={<DeleteOutlined />}
                   onClick={confirmClearConversation}
-                  disabled={messages.length === 0 && !assistantStreamingText}
+                  disabled={messages.length === 0 && !streamingText}
                   aria-label="清除对话"
                 />
               </Tooltip>
@@ -1283,7 +1275,7 @@ function VoiceConsole({ username, onLogout, isDev }: { username: string; onLogou
           messageListRef={messageListRef}
           messages={messages}
           realtimeText={realtimeRobinText}
-          streamingText={assistantStreamingText}
+          streamingText={streamingText}
           onCopy={copyText}
           onScroll={handleMessageScroll}
           onToggleExpand={toggleMessageExpanded}
@@ -1397,6 +1389,7 @@ function AppRoot() {
     <div className={showWeChatNotice ? 'app-root with-wechat-notice' : 'app-root'}>
       {showWeChatNotice && <WeChatBrowserNotice onDismiss={() => setWeChatNoticeDismissed(true)} />}
       <AppShell />
+      <VersionBadge />
     </div>
   )
 }
